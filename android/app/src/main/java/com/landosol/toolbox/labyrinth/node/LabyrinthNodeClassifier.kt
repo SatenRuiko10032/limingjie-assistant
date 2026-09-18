@@ -249,6 +249,12 @@ class LabyrinthNodeClassifier(
     private var hintedTargetBlockId: Long? = null
     private var directedMissFrames: Int = 0
     private var typedMissFrames: Int = 0
+    /** Last raw viewport signature seen, used to detect whether the scene is still moving. */
+    private var lastViewportSeen: ViewportSignature? = null
+    /** Consecutive deferred frames; forces a scan past the cap so the bot never stalls. */
+    private var deferredStreak = 0
+    /** Wall-clock ms when the viewport first became visually still; 0 while moving. */
+    private var stableSinceMs: Long = 0L
     var lastSearchMode: String = "full"
         private set
     /** Candidate windows scored by [classifyNode] during the most recent [classifyMapNodes]. */
@@ -263,6 +269,9 @@ class LabyrinthNodeClassifier(
         hintedTargetBlockId = null
         directedMissFrames = 0
         typedMissFrames = 0
+        lastViewportSeen = null
+        deferredStreak = 0
+        stableSinceMs = 0L
         matcher.clearPreparedFrame()
         proposalMatcher.clearPreparedFrame()
         refinementMatcher.clearPreparedFrame()
@@ -576,6 +585,34 @@ class LabyrinthNodeClassifier(
         searchHint: NodeSearchHint? = null,
     ): List<NodeClassification> {
         if (templates.templates.isEmpty()) return emptyList()
+        // Defer any node scan while the viewport is still moving, AND hold off until the map has
+        // been visually still for STABLE_SCAN_DELAY_MS (default 2s). On map re-entry / camera
+        // scroll the frame changes every tick; scanning now only burns cycles on a frame the next
+        // tick invalidates, and the miss counters escalate directed -> typed -> full on a moving
+        // target. Wait until the view is calm for 2s, then scan exactly once. A hard cap forces a
+        // scan past the limit so the bot never stalls on a perpetually jittering view.
+        val currentSig = viewportSignature(frame)
+        val nowMs = System.currentTimeMillis()
+        val viewportStable = lastViewportSeen?.let { isStableViewport(it, frame) } ?: false
+        lastViewportSeen = currentSig
+        if (!viewportStable) {
+            stableSinceMs = 0L
+            deferredStreak++
+            if (deferredStreak <= MAX_DEFERRED_FRAMES_BEFORE_FORCE_SCAN) {
+                lastSearchMode = "deferred"
+                lastSearchWindowCount = 0
+                return previousNodes
+            }
+        } else {
+            if (stableSinceMs == 0L) stableSinceMs = nowMs
+            // Calm for < 2s yet: keep waiting so the single scan lands on a fully settled map.
+            if (nowMs - stableSinceMs < STABLE_SCAN_DELAY_MS) {
+                lastSearchMode = "deferred"
+                lastSearchWindowCount = 0
+                return previousNodes
+            }
+            deferredStreak = 0
+        }
         if (searchHint?.targetBlockId != hintedTargetBlockId) {
             hintedTargetBlockId = searchHint?.targetBlockId
             directedMissFrames = 0
@@ -1014,6 +1051,10 @@ class LabyrinthNodeClassifier(
         const val MIN_CONFIDENCE = 0.40
         private const val DIRECTED_MISS_FRAMES_BEFORE_EXPAND = 2
         private const val TYPED_MISS_FRAMES_BEFORE_FULL = 2
+        /** How long (ms) the viewport must stay visually still before a deferred scan is allowed. */
+        private const val STABLE_SCAN_DELAY_MS = 2000L
+        /** Max consecutive frames a scan may be deferred for viewport motion before forcing one. */
+        private const val MAX_DEFERRED_FRAMES_BEFORE_FORCE_SCAN = 40
         /**
          * Windows whose centre is farther than this many column pitches from the tracker
          * prediction are dropped. Half a pitch keeps the predicted column plus the inner edge of
