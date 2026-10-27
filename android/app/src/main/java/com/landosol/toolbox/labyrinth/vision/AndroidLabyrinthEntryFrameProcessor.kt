@@ -284,14 +284,26 @@ class AndroidLabyrinthEntryFrameProcessor private constructor(
             nodeScanRequested: () -> Boolean = { true },
             nodeScanConsumable: () -> Boolean = { true },
             rosterCharacterIds: () -> Set<String> = { emptySet() },
+            /**
+             * Actual pixel size of the capture currently feeding this session.
+             *
+             * Non-null and not 1920x1080 means the anchor templates are scaled once, right here,
+             * to the size of their own rect (see [EntryTemplatePrescaler]). Null keeps the
+             * original templates and the per-score mapping.
+             */
+            captureFrameSize: () -> Pair<Int, Int>? = { null },
         ): AndroidLabyrinthEntryFrameProcessor {
+            val entryTemplates = AndroidLabyrinthEntryTemplateLoader(context).load()
+            val preScaledTemplates = captureFrameSize()?.let { (width, height) ->
+                EntryTemplatePrescaler.build(entryTemplates, width, height)
+            }
             val relicTemplates = AndroidLabyrinthRelicTemplateLoader(context).load()
             val characterTemplates = AndroidLabyrinthBattleTeamTemplateLoader(context).load(characterAttributes)
             val characterIconMatcher = LabyrinthCharacterIconMatcher(characterTemplates)
             val characterRecognizer = LabyrinthCharacterRecognizer(characterIconMatcher)
             return AndroidLabyrinthEntryFrameProcessor(
                 processor = LabyrinthEntryFrameProcessor(
-                    templates = AndroidLabyrinthEntryTemplateLoader(context).load(),
+                    templates = entryTemplates,
                     nodeTemplates = AndroidLabyrinthNodeTemplateLoader(context).load(),
                     finalBossOnly = finalBossOnly,
                     nodeSearchHint = nodeSearchHint,
@@ -311,6 +323,7 @@ class AndroidLabyrinthEntryFrameProcessor private constructor(
                         buyButtonTemplate = AndroidLabyrinthShopTemplateLoader(context).loadBuyButton(),
                         relicTemplates = relicTemplates,
                     ),
+                    preScaledTemplates = preScaledTemplates,
                 ),
                 exEncounterResolver = AndroidLabyrinthExEncounterResolver(),
                 eventChoiceResolver = runCatching {

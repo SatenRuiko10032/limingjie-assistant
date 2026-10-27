@@ -684,16 +684,21 @@ class LabyrinthEntryRecognitionPolicyTest {
     fun `shop transition frames are never a session block without an actionable return-title`() {
         // 2026-09-18 live: every purchase produced "检测到账号会话失效" because the shop dialog's
         // blue title bar scores on the broad reconnect template.
-        fun shopFrame(returnScore: Double) = LabyrinthEntryFrameResult(
+        fun shopFrame(
+            returnScore: Double,
+            errorScore: Double = 0.55,
+            shopTitle: Double = 0.99,
+            shopClose: Double = 1.0,
+        ) = LabyrinthEntryFrameResult(
             observation = LabyrinthEntryPageObservation(
                 state = LabyrinthEntryPageState.UNKNOWN,
                 confidence = 0.0,
                 stateScores = emptyMap(),
                 anchorScores = LabyrinthAnchorScores(
                     mapOf(
-                        EntryAnchorId.SHOP_TITLE to 0.99,
-                        EntryAnchorId.SHOP_CLOSE to 1.0,
-                        EntryAnchorId.SESSION_ERROR_TITLE to 0.55,
+                        EntryAnchorId.SHOP_TITLE to shopTitle,
+                        EntryAnchorId.SHOP_CLOSE to shopClose,
+                        EntryAnchorId.SESSION_ERROR_TITLE to errorScore,
                         EntryAnchorId.SESSION_RETURN_TITLE to returnScore,
                     ),
                 ),
@@ -708,8 +713,22 @@ class LabyrinthEntryRecognitionPolicyTest {
         )
 
         assertEquals(SessionBlockKind.NONE, labyrinthSessionBlockObservation(shopFrame(0.10)).kind)
-        // A real expiry over the shop still shows 返回标题 and stays actionable.
-        assertEquals(SessionBlockKind.RECONNECT_PROMPTED, labyrinthSessionBlockObservation(shopFrame(0.88)).kind)
+        // 2026-10-27 live: the 返回标题 template sits on the shop's blue title bar at 0.48 — above the
+        // old 0.45 gate — so the transition read as "检测到账号会话失效" while the shop chrome was at
+        // 0.99/1.00. Shop evidence outranks session evidence, so it stays a shop transition.
+        assertEquals(SessionBlockKind.NONE, labyrinthSessionBlockObservation(shopFrame(0.48)).kind)
+        // Same shape with the real purchase-confirmation scores (shop 0.96/0.98, session 0.763/0.627).
+        assertEquals(
+            SessionBlockKind.NONE,
+            labyrinthSessionBlockObservation(
+                shopFrame(returnScore = 0.627, errorScore = 0.763, shopTitle = 0.96, shopClose = 0.98),
+            ).kind,
+        )
+        // A real expiry covers the shop chrome entirely: without the shop anchors it stays actionable.
+        assertEquals(
+            SessionBlockKind.RECONNECT_PROMPTED,
+            labyrinthSessionBlockObservation(shopFrame(0.88, shopTitle = 0.0, shopClose = 0.0)).kind,
+        )
     }
 
     @Test

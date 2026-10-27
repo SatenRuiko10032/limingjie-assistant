@@ -461,6 +461,16 @@ class LabyrinthEntryFrameProcessor(
      * the first consumed frame still benefits from a stable-viewport fast path.
      */
     private val nodeScanConsumable: () -> Boolean = { true },
+    /**
+     * Entry templates already scaled to each definition's rect for one concrete capture size,
+     * or null to keep the original per-score mapping.
+     *
+     * Built once at session start (see [EntryTemplatePrescaler]). Scoring with a template whose
+     * size equals its rect turns [GradientTemplateMatcher]'s coordinate mapping into the identity,
+     * which is what a non-1920x1080 capture needs; a table whose size does not match the frame is
+     * ignored rather than used, so a stale copy can never be scored.
+     */
+    private val preScaledTemplates: PreScaledEntryTemplates? = null,
 ) {
     private val finalBossPlatformLocator = FinalBossPlatformLocator(
         nodeTemplates.templates["node.boss.platform"],
@@ -516,6 +526,8 @@ class LabyrinthEntryFrameProcessor(
         var nodeViewportSignature = ""
         var nodeViewportPixels: com.landosol.toolbox.labyrinth.node.NodeViewportPixels? = null
         val elapsedNanos = measureNanoTime {
+            val preScaled = preScaledTemplates
+                ?.takeIf { it.frameWidth == frame.width && it.frameHeight == frame.height }
             val measurements = DEFINITIONS_BY_ID.mapValues { (id, definitions) ->
                 val template = templates.values[id]
                     ?: return@mapValues null
@@ -536,7 +548,11 @@ class LabyrinthEntryFrameProcessor(
                     }
                     mapped?.let { rect ->
                         EntryAnchorMatch(
-                            score = matcher.score(frame, rect, template),
+                            score = matcher.score(
+                                frame,
+                                rect,
+                                preScaled?.templates?.get(definition) ?: template,
+                            ),
                             rect = rect,
                         )
                     }

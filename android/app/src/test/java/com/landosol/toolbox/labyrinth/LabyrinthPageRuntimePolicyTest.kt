@@ -113,6 +113,29 @@ class LabyrinthPageRuntimePolicyTest {
         assertFalse(labyrinthShopBackgroundVisible(map))
     }
 
+    @Test fun `shop chrome outranks the session chrome only while it is still on screen`() {
+        // 2026-10-27 live purchase transition: shop 0.96/0.98, session 0.763/0.627 ⇒ shop-owned frame.
+        assertTrue(
+            labyrinthShopChromeOutweighsSession(
+                result(LabyrinthEntryPageState.UNKNOWN, anchorScores = mapOf(
+                    EntryAnchorId.SHOP_TITLE to 0.96,
+                    EntryAnchorId.SHOP_CLOSE to 0.98,
+                    EntryAnchorId.SESSION_ERROR_TITLE to 0.763,
+                    EntryAnchorId.SESSION_RETURN_TITLE to 0.627,
+                )),
+            ),
+        )
+        // A real expiry overlay collapses the shop chrome, so its own evidence dominates.
+        assertFalse(
+            labyrinthShopChromeOutweighsSession(
+                result(LabyrinthEntryPageState.UNKNOWN, anchorScores = mapOf(
+                    EntryAnchorId.SESSION_ERROR_TITLE to 0.91,
+                    EntryAnchorId.SESSION_RETURN_TITLE to 0.88,
+                )),
+            ),
+        )
+    }
+
     @Test
     fun `orphan movement modal can recover only from strong unique route evidence`() {
         assertTrue(
