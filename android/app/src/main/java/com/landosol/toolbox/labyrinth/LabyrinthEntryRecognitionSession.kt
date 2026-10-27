@@ -1041,12 +1041,11 @@ internal fun labyrinthSessionBlockObservation(
     // The shop's own dialogs (purchase confirmation / purchase complete / exit confirmation)
     // reuse the blue title bar the broad reconnect template was cut from, and a transition frame
     // between them classifies UNKNOWN while the shop chrome stays on screen. 2026-09-18 live:
-    // every purchase produced "检测到账号会话失效". A session dialog is a full-screen overlay, so a
-    // genuine expiry collapses the shop's own anchors; while they still outscore every session
-    // anchor there is no dialog on top and nothing to act on anyway.
+    // every purchase produced "检测到账号会话失效". Without a recognised 返回标题 button there is
+    // nothing to act on anyway; a genuine expiry inside the shop still shows that button.
     if (
         labyrinthShopBackgroundVisible(result) &&
-        labyrinthShopChromeOutweighsSession(result)
+        result.observation.anchorScores[EntryAnchorId.SESSION_RETURN_TITLE] < SESSION_RETURN_TITLE_MIN_SCORE
     ) {
         return LabyrinthSessionBlockObservation(SessionBlockKind.NONE, returnTitleRect = null)
     }

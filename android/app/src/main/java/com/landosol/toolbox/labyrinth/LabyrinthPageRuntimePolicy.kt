@@ -435,24 +435,6 @@ internal fun labyrinthShopBackgroundVisible(result: LabyrinthEntryFrameResult): 
         EntryAnchorId.SHOP_REFRESH_BUTTON, EntryAnchorId.SHOP_CLOSE)
         .count { result.observation.anchorScores[it] >= 0.65 } >= 2
 
-/**
- * A session prompt is a full-screen overlay: once it is up the shop's own fixed chrome collapses.
- * So while the shop anchors still outscore every session anchor, no session prompt can be on top
- * of the shop — the frame is a shop-owned transition, not an expired session.
- *
- * 109 247-frame replay (2026-10-27): with two shop anchors visible the shop side never read below
- * 0.960 while the strongest session anchor never exceeded 0.766, so this comparison separates the
- * two populations by itself and needs no new threshold.
- */
-internal fun labyrinthShopChromeOutweighsSession(result: LabyrinthEntryFrameResult): Boolean {
-    val scores = result.observation.anchorScores
-    val shop = listOf(EntryAnchorId.SHOP_TITLE, EntryAnchorId.SHOP_INSTRUCTION,
-        EntryAnchorId.SHOP_REFRESH_BUTTON, EntryAnchorId.SHOP_CLOSE).maxOf { scores[it] }
-    val session = listOf(EntryAnchorId.SESSION_ERROR_TITLE,
-        EntryAnchorId.SESSION_RETURN_TITLE).maxOf { scores[it] }
-    return shop > session
-}
-
 internal fun labyrinthShopJoinedRewardOwnsRoute(
     result: LabyrinthEntryFrameResult,
     purchaseConfirmedAt: Long,
