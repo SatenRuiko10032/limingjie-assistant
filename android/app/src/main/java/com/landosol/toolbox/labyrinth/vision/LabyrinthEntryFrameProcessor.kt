@@ -862,7 +862,7 @@ class LabyrinthEntryFrameProcessor(
             // candidates instead of widening the ROI (which would rescale the template).
             standard(EntryAnchorId.SHOP_PURCHASE_CONFIRMATION_TITLE, 750, 125, 420, 75),
             standard(EntryAnchorId.SHOP_PURCHASE_CONFIRMATION_TITLE, 750, 133, 420, 75),
-            standard(EntryAnchorId.SHOP_PURCHASE_COMPLETE_TITLE, 750, 245, 420, 75),
+            standard(EntryAnchorId.SHOP_PURCHASE_COMPLETE_TITLE, 750, 258, 420, 75),
             standard(EntryAnchorId.SHOP_EXIT_CONFIRMATION_TITLE, 750, 240, 420, 75),
             standard(EntryAnchorId.SHOP_EXIT_CONFIRM_BUTTON, 980, 706, 400, 80),
             // Current purchase-confirmation modal renders the same blue "确认" button lower.

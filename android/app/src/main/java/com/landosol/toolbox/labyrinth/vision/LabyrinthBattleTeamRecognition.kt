@@ -670,8 +670,7 @@ class LabyrinthBattleTeamRecognizer(
         }
         // The member strip is a fixed row. Do not let the scrolling-grid projection
         // derive its pitch/top from portrait contents or the power labels above each face.
-        val memberHints = profile.fallbackSelectedSlots.mapNotNull { slot -> mapSlotRect(frame, slot) }
-        val selectedSlots = currentMemberStripDetector.refine(frame, memberHints)
+        val selectedSlots = profile.fallbackSelectedSlots.mapNotNull { slot -> mapSlotRect(frame, slot) }
             .mapIndexed { index, rect ->
                 Slot(id = "current_member_${index + 1}", screenRect = rect, recognitionRect = rect)
             }
@@ -1730,9 +1729,13 @@ class LabyrinthBattleTeamRecognizer(
         const val SCROLLBAR_THUMB_MIN_BLUE = 140
         const val SCROLLBAR_THUMB_MIN_BLUE_MINUS_RED = 45
         const val SCROLLBAR_THUMB_MIN_GREEN_MINUS_RED = 15
-        const val ICON_CARD_INSET_LEFT = 6
-        const val ICON_CARD_INSET_TOP = 6
-        const val ICON_CARD_HORIZONTAL_INSET = 14
+        // The old 6/6/14 inset was fixed pixels: it shaved 7% of a 195px card but 10.8% of a
+        // 130px (720P) card, and lopsidedly (left +6, right -8). The window shrank so far on 720P
+        // that the correct role's margin collapsed below 0.045 and it got misidentified. Only the
+        // left 2px dark border needs cutting; the right edge is already covered by the x>0.82 mask.
+        const val ICON_CARD_INSET_LEFT = 2
+        const val ICON_CARD_INSET_TOP = 0
+        const val ICON_CARD_HORIZONTAL_INSET = 2
         const val ATTRIBUTE_BADGE_LEFT_RATIO = 0.78
         const val ATTRIBUTE_BADGE_TOP_RATIO = 0.76
         const val ATTRIBUTE_BADGE_WIDTH_RATIO = 0.19

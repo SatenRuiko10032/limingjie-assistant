@@ -276,6 +276,7 @@ class LabyrinthShopRecognizer(
             attribute = template?.attribute,
             attributeBonus = template?.attributeBonus,
             effect = template?.effect,
+            rarity = template?.rarity ?: 0,
             confidence = score,
             screenRect = screenRect,
             iconRect = iconRect,
