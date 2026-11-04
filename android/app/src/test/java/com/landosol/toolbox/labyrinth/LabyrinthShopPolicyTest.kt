@@ -486,6 +486,367 @@ class LabyrinthShopPolicyTest {
         assertEquals("speed", choose(5))
     }
 
+    @Test
+    fun `areas skip three and four star relics until area five clears out`() {
+        val policy = LabyrinthShopPolicy()
+        // Area 3 never buys a refused relic.
+        assertTrue("area 3 must not buy a ★3 relic",
+            policy.decide(3, listOf(item("rare", "会心", 2, recognized = true, rarity = 3)),
+                emptyList(), refreshAvailable = false) is LabyrinthShopDecision.Close)
+        // Area 5 clears a ★3 relic out once the refill button is dead.
+        assertTrue("area 5 must clear out a ★3 relic after the refill dies",
+            policy.decide(5, listOf(item("rare", "会心", 2, recognized = true, rarity = 3)),
+                emptyList(), refreshAvailable = false) is LabyrinthShopDecision.BuyRelic)
+        // ★4 stays refused even during the clear-out.
+        assertTrue("★4 stays refused in area 5",
+            policy.decide(5, listOf(item("rare", "会心", 2, recognized = true, rarity = 4)),
+                emptyList(), refreshAvailable = false) is LabyrinthShopDecision.Close)
+    }
+
+    @Test
+    fun `area 3 and area 5 still buy one and two star relics`() {
+        val policy = LabyrinthShopPolicy()
+        for (area in intArrayOf(3, 5)) {
+            for (rarity in intArrayOf(1, 2)) {
+                val decision = policy.decide(
+                    currentArea = area,
+                    items = listOf(item("cheap", "会心", 1, recognized = true, rarity = rarity)),
+                    acquired = emptyList(),
+                    refreshAvailable = false,
+                )
+                assertTrue(
+                    "area $area must buy a ★$rarity relic: $decision",
+                    decision is LabyrinthShopDecision.BuyRelic,
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `areas outside the rarity gate keep the unrestricted behaviour`() {
+        val policy = LabyrinthShopPolicy()
+        val decision = policy.decide(
+            currentArea = 2,
+            items = listOf(item("rare", "会心", 2, recognized = true, rarity = 3)),
+            acquired = emptyList(),
+            refreshAvailable = false,
+        )
+        assertTrue("area 2 has no rarity gate: $decision", decision is LabyrinthShopDecision.BuyRelic)
+    }
+
+    @Test
+    fun `a skipped star row still falls through to refresh and imprint fallbacks`() {
+        val policy = LabyrinthShopPolicy()
+        // 区域5：三个位都是被跳过的 ★3，遗物已买满 → 刷新优先于关店。
+        val refresh = policy.decide(
+            currentArea = 5,
+            items = listOf(
+                item("s1", "会心", 2, recognized = true, rarity = 3),
+                item("s2", "守备", 1, recognized = true, rarity = 4),
+                item("s3", "强化", 1, recognized = true, rarity = 3),
+            ),
+            acquired = emptyList(),
+            refreshAvailable = true,
+            relicPurchasesInCycle = 3,
+        )
+        assertTrue("exhausted cycle with only gated relics must refresh: $refresh",
+            refresh is LabyrinthShopDecision.Refresh)
+        // 区域3：不能刷新 → 印记兜底。
+        val imprint = policy.decide(
+            currentArea = 3,
+            items = listOf(
+                item("s1", "会心", 2, recognized = true, rarity = 3),
+                item("s2", null, null, recognized = false, kind = LabyrinthShopItemKind.ROLE_IMPRINT,
+                    roleImprintLabel = "增益型职能印记"),
+            ),
+            acquired = emptyList(),
+            refreshAvailable = false,
+        )
+        assertTrue("area 3 must fall through to the imprint fallback: $imprint",
+            imprint is LabyrinthShopDecision.BuyRoleImprint)
+    }
+
+    @Test
+    fun `area 3 skips choice imprints while area 5 only clears them out after the refill dies`() {
+        val policy = LabyrinthShopPolicy()
+        val choiceOnly = item("s1", null, null, recognized = false,
+            kind = LabyrinthShopItemKind.ROLE_IMPRINT,
+            roleImprintLabel = "坦克型职能印记", choiceRoleImprint = true)
+        assertTrue("area 3 must skip a role-specific 选择 imprint",
+            policy.decide(3, listOf(choiceOnly), emptyList(), refreshAvailable = false)
+                is LabyrinthShopDecision.Close)
+        assertTrue("area 5 clears the choice imprint out once the refill dies",
+            policy.decide(5, listOf(choiceOnly), emptyList(), refreshAvailable = false)
+                is LabyrinthShopDecision.BuyRoleImprint)
+    }
+
+    @Test
+    fun `random imprints are still bought inside the gated areas`() {
+        val policy = LabyrinthShopPolicy()
+        for (area in intArrayOf(3, 5)) {
+            val decision = policy.decide(
+                currentArea = area,
+                items = listOf(item("s1", null, null, recognized = false,
+                    kind = LabyrinthShopItemKind.ROLE_IMPRINT,
+                    roleImprintLabel = "坦克型职能印记", choiceRoleImprint = false)),
+                acquired = emptyList(),
+                refreshAvailable = false,
+            )
+            assertTrue("area $area must buy a random imprint: $decision",
+                decision is LabyrinthShopDecision.BuyRoleImprint)
+        }
+    }
+
+    @Test
+    fun `the all-roster choice imprint is not gated`() {
+        val policy = LabyrinthShopPolicy()
+        val decision = policy.decide(
+            currentArea = 3,
+            items = listOf(item("s1", null, null, recognized = false,
+                kind = LabyrinthShopItemKind.ROLE_IMPRINT,
+                roleImprintLabel = "全体选择印记", choiceRoleImprint = true)),
+            acquired = emptyList(),
+            refreshAvailable = false,
+        )
+        assertTrue("全体选择印记 keeps the fallback behaviour: $decision",
+            decision is LabyrinthShopDecision.BuyRoleImprint)
+    }
+
+    @Test
+    fun `areas outside the imprint gate keep buying choice imprints`() {
+        val policy = LabyrinthShopPolicy()
+        val decision = policy.decide(
+            currentArea = 2,
+            items = listOf(item("s1", null, null, recognized = false,
+                kind = LabyrinthShopItemKind.ROLE_IMPRINT,
+                roleImprintLabel = "坦克型职能印记", choiceRoleImprint = true)),
+            acquired = emptyList(),
+            refreshAvailable = false,
+        )
+        assertTrue("area 2 has no imprint gate: $decision",
+            decision is LabyrinthShopDecision.BuyRoleImprint)
+    }
+
+    @Test
+    fun `a refused star relic no longer keeps the row from refilling`() {
+        // 2026-11-01 C2 field log (area 5): 極醒护身符 ★3 purchasable on the shelf, a role-specific
+        // 选择 imprint beside it, a sold-out third slot, 7,760 coins and a usable 300-coin refill.
+        // The buy branch refuses the ★3 and the imprint gate refuses the 选择 imprint, so the row
+        // had nothing actionable left -- yet the refill predicate still counted the ★3 as buyable
+        // stock and the run closed the shop instead of refilling.
+        val policy = LabyrinthShopPolicy()
+        val decision = policy.decide(
+            currentArea = 5,
+            items = listOf(
+                item("rare3", "强化", 3, recognized = true, rarity = 3),
+                item("choice", null, null, recognized = false,
+                    kind = LabyrinthShopItemKind.ROLE_IMPRINT,
+                    roleImprintLabel = "减益型职能印记", choiceRoleImprint = true),
+                item("gone", null, null, recognized = false,
+                    status = LabyrinthShopItemStatus.DISABLED),
+            ),
+            acquired = emptyList(),
+            refreshAvailable = true,
+            relicPurchasesInCycle = 2,
+        )
+        assertTrue("a row with only refused goods must refill: $decision",
+            decision is LabyrinthShopDecision.Refresh)
+    }
+
+    @Test
+    fun `an unresolved affordable slot still waits before refilling`() {
+        val policy = LabyrinthShopPolicy()
+        val decision = policy.decide(
+            currentArea = 5,
+            items = listOf(
+                item("rare3", "强化", 3, recognized = true, rarity = 3),
+                item("pending", null, null, recognized = false,
+                    categoryState = LabyrinthShopCategoryState.READING),
+                item("gone", null, null, recognized = false,
+                    status = LabyrinthShopItemStatus.DISABLED),
+            ),
+            acquired = emptyList(),
+            refreshAvailable = true,
+            relicPurchasesInCycle = 2,
+        )
+        assertTrue("an unread affordable slot must not be skipped by a refill: $decision",
+            decision is LabyrinthShopDecision.Wait)
+    }
+
+    @Test
+    fun `a refused star relic does not outrank an affordable one`() {
+        val policy = LabyrinthShopPolicy()
+        val decision = policy.decide(
+            currentArea = 5,
+            items = listOf(
+                item("rare3", "强化", 3, recognized = true, rarity = 3),
+                item("two", "加速", 1, recognized = true, rarity = 2),
+                item("choice", null, null, recognized = false,
+                    kind = LabyrinthShopItemKind.ROLE_IMPRINT,
+                    roleImprintLabel = "减益型职能印记", choiceRoleImprint = true),
+            ),
+            acquired = emptyList(),
+            refreshAvailable = true,
+            relicPurchasesInCycle = 2,
+        )
+        assertTrue("the ★2 relic must still be bought: $decision",
+            decision is LabyrinthShopDecision.BuyRelic)
+        assertEquals("two", (decision as LabyrinthShopDecision.BuyRelic).item.relicMatch?.relicId)
+    }
+
+    @Test
+    fun `area 3 closes instead of refilling a refused row`() {
+        // Area 3 may not refill at all (refreshFromArea = 5), so the same row must end the visit
+        // rather than spend coins the policy never allowed there.
+        val policy = LabyrinthShopPolicy()
+        val decision = policy.decide(
+            currentArea = 3,
+            items = listOf(
+                item("rare3", "强化", 3, recognized = true, rarity = 3),
+                item("choice", null, null, recognized = false,
+                    kind = LabyrinthShopItemKind.ROLE_IMPRINT,
+                    roleImprintLabel = "减益型职能印记", choiceRoleImprint = true),
+                item("gone", null, null, recognized = false,
+                    status = LabyrinthShopItemStatus.DISABLED),
+            ),
+            acquired = emptyList(),
+            refreshAvailable = true,
+            relicPurchasesInCycle = 2,
+        )
+        assertTrue("area 3 must not refill: $decision", decision is LabyrinthShopDecision.Close)
+    }
+
+    @Test
+    fun `area 5 clear-out buys the refused star three relic once the refill dies`() {
+        val policy = LabyrinthShopPolicy()
+        val decision = policy.decide(
+            currentArea = 5,
+            items = listOf(
+                item("rare3", "强化", 2, recognized = true, rarity = 3),
+                item("gone1", null, null, recognized = false, status = LabyrinthShopItemStatus.DISABLED),
+                item("gone2", null, null, recognized = false, status = LabyrinthShopItemStatus.DISABLED),
+            ),
+            acquired = emptyList(),
+            refreshAvailable = false,
+            relicPurchasesInCycle = 1,
+        )
+        assertTrue("area 5 must clear out a ★3 relic after the refill dies: $decision",
+            decision is LabyrinthShopDecision.BuyRelic)
+    }
+
+    @Test
+    fun `area 5 clear-out buys a choice imprint after everything cheaper is gone`() {
+        val policy = LabyrinthShopPolicy()
+        val decision = policy.decide(
+            currentArea = 5,
+            items = listOf(
+                item("choice", null, null, recognized = false,
+                    kind = LabyrinthShopItemKind.ROLE_IMPRINT,
+                    roleImprintLabel = "破防型职能印记", choiceRoleImprint = true),
+                item("gone1", null, null, recognized = false, status = LabyrinthShopItemStatus.DISABLED),
+                item("gone2", null, null, recognized = false, status = LabyrinthShopItemStatus.DISABLED),
+            ),
+            acquired = emptyList(),
+            refreshAvailable = false,
+            relicPurchasesInCycle = 1,
+        )
+        assertTrue("area 5 must clear out a choice imprint after the refill dies: $decision",
+            decision is LabyrinthShopDecision.BuyRoleImprint)
+    }
+
+    @Test
+    fun `area 5 clear-out prefers the star three relic over the choice imprint`() {
+        val policy = LabyrinthShopPolicy()
+        val decision = policy.decide(
+            currentArea = 5,
+            items = listOf(
+                item("rare3", "强化", 2, recognized = true, rarity = 3),
+                item("choice", null, null, recognized = false,
+                    kind = LabyrinthShopItemKind.ROLE_IMPRINT,
+                    roleImprintLabel = "破防型职能印记", choiceRoleImprint = true),
+                item("gone", null, null, recognized = false, status = LabyrinthShopItemStatus.DISABLED),
+            ),
+            acquired = emptyList(),
+            refreshAvailable = false,
+            relicPurchasesInCycle = 1,
+        )
+        assertTrue("★3 (12.35/point) must go before the choice imprint (21/point): $decision",
+            decision is LabyrinthShopDecision.BuyRelic)
+    }
+
+    @Test
+    fun `area 5 clear-out still buys the random imprint before the star three relic`() {
+        val policy = LabyrinthShopPolicy()
+        val decision = policy.decide(
+            currentArea = 5,
+            items = listOf(
+                item("rare3", "强化", 2, recognized = true, rarity = 3),
+                item("imprint", null, null, recognized = false,
+                    kind = LabyrinthShopItemKind.ROLE_IMPRINT,
+                    roleImprintLabel = "坦克型职能印记"),
+                item("gone", null, null, recognized = false, status = LabyrinthShopItemStatus.DISABLED),
+            ),
+            acquired = emptyList(),
+            refreshAvailable = false,
+            relicPurchasesInCycle = 1,
+        )
+        assertTrue("the random imprint (9.00/point) must go before ★3 (12.35/point): $decision",
+            decision is LabyrinthShopDecision.BuyRoleImprint)
+    }
+
+    @Test
+    fun `area 5 clear-out stays locked while the refill is still available`() {
+        val policy = LabyrinthShopPolicy()
+        val decision = policy.decide(
+            currentArea = 5,
+            items = listOf(
+                item("rare3", "强化", 2, recognized = true, rarity = 3),
+                item("gone1", null, null, recognized = false, status = LabyrinthShopItemStatus.DISABLED),
+                item("gone2", null, null, recognized = false, status = LabyrinthShopItemStatus.DISABLED),
+            ),
+            acquired = emptyList(),
+            refreshAvailable = true,
+            relicPurchasesInCycle = 1,
+        )
+        assertTrue("a live refill must still be preferred over a ★3 relic: $decision",
+            decision is LabyrinthShopDecision.Refresh)
+    }
+
+    @Test
+    fun `area 3 never clears out refused goods`() {
+        val policy = LabyrinthShopPolicy(finalArea = 3)
+        val decision = policy.decide(
+            currentArea = 3,
+            items = listOf(
+                item("rare3", "强化", 2, recognized = true, rarity = 3),
+                item("gone1", null, null, recognized = false, status = LabyrinthShopItemStatus.DISABLED),
+                item("gone2", null, null, recognized = false, status = LabyrinthShopItemStatus.DISABLED),
+            ),
+            acquired = emptyList(),
+            refreshAvailable = false,
+            relicPurchasesInCycle = 1,
+        )
+        assertTrue("only area 5 clears out: $decision", decision is LabyrinthShopDecision.Close)
+    }
+
+    @Test
+    fun `area 5 clear-out still refuses the star four relic`() {
+        val policy = LabyrinthShopPolicy()
+        val decision = policy.decide(
+            currentArea = 5,
+            items = listOf(
+                item("rare4", "强化", 3, recognized = true, rarity = 4),
+                item("gone1", null, null, recognized = false, status = LabyrinthShopItemStatus.DISABLED),
+                item("gone2", null, null, recognized = false, status = LabyrinthShopItemStatus.DISABLED),
+            ),
+            acquired = emptyList(),
+            refreshAvailable = false,
+            relicPurchasesInCycle = 1,
+        )
+        assertTrue("★4 stays refused at 32.5 coins/point: $decision",
+            decision is LabyrinthShopDecision.Close)
+    }
+
     private fun item(
         id: String,
         mark: String?,
@@ -495,6 +856,9 @@ class LabyrinthShopPolicyTest {
         status: LabyrinthShopItemStatus = LabyrinthShopItemStatus.AVAILABLE,
         kind: LabyrinthShopItemKind = if (recognized) LabyrinthShopItemKind.RELIC else LabyrinthShopItemKind.UNKNOWN,
         roleImprintLabel: String? = null,
+        rarity: Int = 0,
+        choiceRoleImprint: Boolean = false,
+        categoryState: LabyrinthShopCategoryState = LabyrinthShopCategoryState.READY,
     ): LabyrinthShopItemMatch {
         val relic = LabyrinthRelicMatch(
             slotId = id,
@@ -503,6 +867,7 @@ class LabyrinthShopPolicyTest {
             attribute = if (recognized) mark else null,
             attributeBonus = if (recognized) bonus?.toString() else null,
             effect = null,
+            rarity = rarity,
             confidence = confidence,
             screenRect = rect,
             iconRect = rect,
@@ -521,6 +886,8 @@ class LabyrinthShopPolicyTest {
             relicMatch = relic,
             kind = kind,
             roleImprintLabel = roleImprintLabel,
+            choiceRoleImprint = choiceRoleImprint,
+            categoryState = categoryState,
         )
     }
 }

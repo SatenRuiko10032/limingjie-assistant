@@ -53,11 +53,44 @@ class LabyrinthShopPolicy(
     private val buyRelics: Boolean = true,
     private val refreshEnabled: Boolean = true,
     /**
+     * Per-area relic rarity gates. A recognized relic whose rarity is listed for the current
+     * area is never bought: the row keeps evaluating as if that good did not exist, so the run
+     * falls through to the imprint fallback / close decisions instead of spending on it.
+     * 2026-11-01 request: areas 3 and 5 only buy ★1/★2 relics, so ★3/★4 are skipped there.
+     * Areas absent from this map keep the unrestricted behaviour.
+     */
+    private val skipRelicRaritiesByArea: Map<Int, Set<Int>> =
+        mapOf(3 to setOf(3, 4), 5 to setOf(3, 4)),
+    /**
+     * Per-area imprint form gate. When true for the current area, only 随机 imprints are bought:
+     * a role-specific 选择 imprint (choiceRoleImprint = true) is treated as if it did not exist
+     * and the run falls through to the refresh / close decisions. 2026-11-01 request: 随机 780
+     * against 选择 1,820 for the same role, and the choice variant additionally opens a roster
+     * picker the run then has to answer. 全体选择印记 is deliberately NOT gated (user 2026-11-01:
+     * the rule only covers role-specific 选择 imprints), so it keeps the fallback behaviour.
+     * Areas absent from this map keep the unrestricted behaviour.
+     */
+    private val randomRoleImprintsOnlyByArea: Map<Int, Boolean> =
+        mapOf(3 to true, 5 to true),
+    /**
      * Per-area cap on 300-coin refills inside one shop visit. Area 3 defaults to a single refill:
      * a second refill there routinely returns a row the current balance cannot buy, so it only
      * spends coins. Areas absent from this map keep the unlimited behaviour.
      */
     private val refreshLimitsByArea: Map<Int, Int> = mapOf(3 to 1),
+    /**
+     * Areas that clear out the row once the refill button is known to be dark.
+     *
+     * 2026-11-01 request: in area 5 the coins cannot survive the run, so a dark refill button means
+     * the remaining balance can only become score through goods the value gates below otherwise
+     * refuse. The clearance ladder runs after every normal buy decision and follows the coin cost
+     * per point: ★1/★2 relics (5.85–9.10) -> random imprint (9.00) -> ★3 relic (12.35) ->
+     * role-specific 选择 imprint (21.00). ★4 relics stay refused (32.5). Areas absent from this
+     * set keep the historical behaviour: buy what the gates allow, then close.
+     */
+    private val clearanceArea: Set<Int> = setOf(5),
+    /** Rarities the clearance ladder may still buy after the refill dies. */
+    private val clearanceRelicRarities: Set<Int> = setOf(3),
 ) {
     fun decide(
         currentArea: Int?,
@@ -77,6 +110,11 @@ class LabyrinthShopPolicy(
         // normal buy-imprint / close decisions below.
         val refreshBudget = currentArea?.let { refreshLimitsByArea[it] }
         val refreshPermitted = refreshAllowed && (refreshBudget == null || refreshesUsedInVisit < refreshBudget)
+        // See [clearanceArea]: a dark refill button in area 5 unlocks the clearance ladder at the
+        // end of this function, and suspends the "still reading / ambiguous / unknown" waits so a
+        // row that never resolves cannot park the visit for ever.
+        val clearance = currentArea != null && currentArea in clearanceArea &&
+            refreshPermitted && refreshAvailabilityKnown && !refreshAvailable
         // Area 4 is a hard saving stop: no purchase and no 300-coin refresh, so the coins survive
         // into area 5. This is independent of the configured refresh starting area -- lowering
         // that to 3 must affect areas 3 and 5 only, never hand area 4 a spending license.
@@ -92,11 +130,15 @@ class LabyrinthShopPolicy(
         // shop: 随机印记 780 against 选择印记 1,820) and it opens a full-roster picker the run then
         // has to answer. Cheaper and fewer moving parts for the same reward, so it goes first;
         // within one variant the leftmost slot still wins, keeping the pick deterministic.
+        val randomImprintsOnly = currentArea?.let { randomRoleImprintsOnlyByArea[it] } ?: false
         val purchasableRoleImprint = items
             .filter { item ->
                 item.categoryState == LabyrinthShopCategoryState.READY &&
                     item.purchasable && item.kind == LabyrinthShopItemKind.ROLE_IMPRINT &&
-                    !item.roleImprintLabel.isNullOrBlank()
+                    !item.roleImprintLabel.isNullOrBlank() &&
+                    // 全体选择印记 keeps the fallback behaviour; only role-specific 选择 imprints are gated.
+                    (!randomImprintsOnly || !item.choiceRoleImprint ||
+                        item.roleImprintLabel == "全体选择印记")
             }
             .minWithOrNull(compareBy({ it.choiceRoleImprint }, { it.slotId }))
 
@@ -137,17 +179,43 @@ class LabyrinthShopPolicy(
             if (items.any { it.purchasable && it.categoryState == LabyrinthShopCategoryState.READING }) {
                 return LabyrinthShopDecision.Wait("遗物已买完，正在有限重试确认剩余商品类别")
             }
-            return LabyrinthShopDecision.Close(
-                if ((currentArea ?: 0) >= finalArea) {
-                    "本轮前三个遗物已买完且无法刷新，也没有可购买印记，结束商店"
-                } else {
-                    "区域${currentArea ?: "?"}本轮前三个遗物已买完，没有可购买印记，结束商店"
-                },
-            )
+            // During clearance the visit continues to the ladder at the end of this function
+            // instead of closing here.
+            if (!clearance) {
+                return LabyrinthShopDecision.Close(
+                    if ((currentArea ?: 0) >= finalArea) {
+                        "本轮前三个遗物已买完且无法刷新，也没有可购买印记，结束商店"
+                    } else {
+                        "区域${currentArea ?: "?"}本轮前三个遗物已买完，没有可购买印记，结束商店"
+                    },
+                )
+            }
         }
         val purchasable = items.filter { it.purchasable && it.categoryState == LabyrinthShopCategoryState.READY }
+        val skipRelicRarities = currentArea?.let { skipRelicRaritiesByArea[it] } ?: emptySet()
         val recognizedRelicItems = purchasable.filter {
-            it.kind != LabyrinthShopItemKind.ROLE_IMPRINT && it.relicMatch?.recognized == true
+            it.kind != LabyrinthShopItemKind.ROLE_IMPRINT && it.relicMatch?.recognized == true &&
+                (it.relicMatch?.rarity ?: 0) !in skipRelicRarities
+        }
+        // Clearance candidates: the goods the value gates refuse, kept aside so the ladder at the
+        // end of this function can spend the dying balance on them in cost order.
+        val clearanceRelicItems = if (clearance) {
+            purchasable.filter {
+                it.kind != LabyrinthShopItemKind.ROLE_IMPRINT &&
+                    it.relicMatch?.recognized == true &&
+                    (it.relicMatch?.rarity ?: 0) in clearanceRelicRarities
+            }
+        } else {
+            emptyList()
+        }
+        val clearanceChoiceImprint = if (clearance) {
+            items.filter { item ->
+                item.categoryState == LabyrinthShopCategoryState.READY &&
+                    item.purchasable && item.kind == LabyrinthShopItemKind.ROLE_IMPRINT &&
+                    !item.roleImprintLabel.isNullOrBlank() && item.choiceRoleImprint
+            }.minWithOrNull(compareBy({ it.slotId }))
+        } else {
+            null
         }
         if (recognizedRelicItems.isNotEmpty()) {
             val candidates = recognizedRelicItems.mapNotNull(LabyrinthShopItemMatch::relicMatch)
@@ -188,10 +256,20 @@ class LabyrinthShopPolicy(
         // Purchase counts can be lost on restart, and sold-out/disabled titles may never pass
         // OCR. Button state independently proves that those goods cannot be bought. Require the
         // complete row: missing controls and unresolved affordable goods do not prove depletion.
-        val noActionableRelicInRow = items.size == relicsPerStockCycle && items.all {
-            it.status == LabyrinthShopItemStatus.DISABLED ||
-                (it.purchasable && it.categoryState == LabyrinthShopCategoryState.READY &&
-                    it.kind == LabyrinthShopItemKind.ROLE_IMPRINT)
+        //
+        // A relic the area gate refuses must count as gone as well. The buy branch above already
+        // filters it out, so leaving it actionable here makes a row of "one refused relic plus
+        // imprints" look like it still has stock: the run then neither buys nor refills, and
+        // closes the shop with coins left over. 2026-11-01 area 5: 極醒护身符 ★3 on the shelf,
+        // 7,760 coins and a usable 300-coin refresh -> three Close decisions in 8 seconds.
+        val noActionableRelicInRow = items.size == relicsPerStockCycle && items.all { item ->
+            val refusedByArea = item.kind != LabyrinthShopItemKind.ROLE_IMPRINT &&
+                item.purchasable && item.categoryState == LabyrinthShopCategoryState.READY &&
+                item.relicMatch?.recognized == true &&
+                (item.relicMatch?.rarity ?: 0) in skipRelicRarities
+            item.status == LabyrinthShopItemStatus.DISABLED || refusedByArea ||
+                (item.purchasable && item.categoryState == LabyrinthShopCategoryState.READY &&
+                    item.kind == LabyrinthShopItemKind.ROLE_IMPRINT)
         }
         if (refreshPermitted && noActionableRelicInRow) {
             if (!refreshAvailabilityKnown) {
@@ -207,6 +285,31 @@ class LabyrinthShopPolicy(
                 item = purchasableRoleImprint,
                 label = purchasableRoleImprint.roleImprintLabel ?: "职能印记",
                 reason = "当前没有可继续购买的遗物，购买可确认印记作为剩余金币兜底",
+            )
+        }
+
+        // Clearance ladder (area 5 only, refill button known to be dark): the balance cannot buy
+        // new stock any more, so pay for the refused goods in cost order. ★1/★2 relics and the
+        // random imprint have already had their chance above; ★4 stays refused at 32.5 coins/point.
+        if (clearanceRelicItems.isNotEmpty()) {
+            val candidates = clearanceRelicItems.mapNotNull(LabyrinthShopItemMatch::relicMatch)
+            val relicDecision = relicChoicePolicy.choose(
+                acquired = acquired,
+                candidates = candidates,
+                calibratedStacks = calibratedStacks,
+                currentArea = currentArea,
+                lockedFocus = lockedFocus,
+            )
+            if (relicDecision != null) {
+                val item = clearanceRelicItems.first { it.relicMatch?.relicId == relicDecision.choice.relicId }
+                return LabyrinthShopDecision.BuyRelic(item, relicDecision)
+            }
+        }
+        if (clearanceChoiceImprint != null) {
+            return LabyrinthShopDecision.BuyRoleImprint(
+                item = clearanceChoiceImprint,
+                label = clearanceChoiceImprint.roleImprintLabel ?: "职能印记",
+                reason = "刷新已用完，用剩余金币购买选择印记",
             )
         }
 
