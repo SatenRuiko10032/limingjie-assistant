@@ -941,9 +941,9 @@
       "id": "session.error.title",
       "file": "vision/session_error_title.bmp",
       "kind": "template",
-      "width": 948,
-      "height": 66,
-      "sha256": "6aeb03cf8c4820533c6417aea4a00fa0486e3962775680a1b4e8f0ed031c8f3e",
+      "width": 200,
+      "height": 44,
+      "sha256": "48e738b81f9758c2dc4a919b52349b7e57886985a0ba2704b6327ef888895107",
       "anchor": "session_error"
     },
     {

@@ -906,7 +906,10 @@ class LabyrinthEntryFrameProcessor(
             standard(EntryAnchorId.SPECIAL_EQUIPMENT_EQUIP_CONFIRM_DISABLED, 1428, 917, 396, 81),
             standard(EntryAnchorId.SPECIAL_EQUIPMENT_AUTO_DIALOG_ANCHOR, 760, 56, 400, 58),
             standard(EntryAnchorId.SPECIAL_EQUIPMENT_AUTO_DIALOG_CONFIRM_BUTTON, 982, 917, 396, 91),
-            standard(EntryAnchorId.SESSION_ERROR_TITLE, 485, 259, 948, 66),
+            // 只框「错误提示」四个字。原先框住整条 948x66 蓝标题（文字仅占 10% 面积），
+            // 与商店「购买完毕」的同款蓝条区分不开：实测该模板在购买完毕弹窗上得 0.729，
+            // 超过 0.55 的会话门槛，每次购买都被判成掉线。裁到文字后同一张图只有 0.179。
+            standard(EntryAnchorId.SESSION_ERROR_TITLE, 859, 272, 200, 44),
             standard(EntryAnchorId.SESSION_RETURN_TITLE, 756, 692, 410, 94),
             standard(EntryAnchorId.SESSION_DATE_CHANGE_TITLE, 790, 258, 340, 70),
             // Current client renders the same date-change title 3 px right/down. Keep both
