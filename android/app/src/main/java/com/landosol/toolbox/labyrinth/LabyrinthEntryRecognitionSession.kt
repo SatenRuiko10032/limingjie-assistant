@@ -1533,6 +1533,16 @@ class LabyrinthEntryRecognitionSession(
     /** A single OCR read is evidence, not truth; require repeated/same-frame corroboration. */
     @Volatile
     private var lastShopDialogState: LabyrinthShopDialogState = LabyrinthShopDialogState.NONE
+
+    /**
+     * 确认弹窗关闭后，连续看到「商店 + 无弹窗」的帧数，以及第一帧的时间。
+     *
+     * 购买成功后游戏会先闪一帧商店（弹窗=NONE）再弹「购买完成」，那一帧不是取消；
+     * 只有帧数和时间都超过门槛才当成真的取消（见 [SHOP_CONFIRM_CANCEL_FRAMES] /
+     * [SHOP_CONFIRM_CANCEL_GRACE_MILLIS]）。
+     */
+    private var shopConfirmClosedFrames = 0
+    private var shopConfirmClosedAt = Long.MIN_VALUE
     private val nodeConflictRecovery = com.landosol.toolbox.labyrinth.node.LabyrinthNodeConflictRecovery()
     @Volatile
     private var nodeSession: LabyrinthNodeSession? = null
@@ -3096,6 +3106,8 @@ class LabyrinthEntryRecognitionSession(
         val shopDialogState = result.shopObservation?.dialogState
         val purchasedRelic = when (shopDialogState) {
             LabyrinthShopDialogState.PURCHASE_CONFIRMATION -> {
+                shopConfirmClosedFrames = 0
+                shopConfirmClosedAt = Long.MIN_VALUE
                 // Only a transaction explicitly planned as a relic is eligible for relic
                 // persistence. Role-imprint icons can resemble relic templates and must never be
                 // written into the relic ledger after their purchase-complete modal.
@@ -3106,23 +3118,44 @@ class LabyrinthEntryRecognitionSession(
             }
 
             LabyrinthShopDialogState.PURCHASE_COMPLETE -> {
+                // 购买完成弹窗出现即证明这次确认不是取消，状态全部归零。
+                shopConfirmClosedFrames = 0
+                shopConfirmClosedAt = Long.MIN_VALUE
                 pendingShopPurchase.also { pendingShopPurchase = null }
             }
 
             LabyrinthShopDialogState.NONE -> {
                 if (lastShopDialogState == LabyrinthShopDialogState.PURCHASE_CONFIRMATION) {
-                    // Returning directly to the shop means the confirmation was cancelled.
-                    pendingShopPurchase = null
-                    clearPlannedShopPurchase()
+                    // 买到东西后游戏常常先闪一帧「商店 + 无弹窗」，紧接着才弹「购买完成」。
+                    // 这一帧只记账，不清计划；否则随后的完成弹窗会被当成人工购买而永远不关
+                    // （2026-11-05 实测：卡在 SHOP_PURCHASE_COMPLETE 76 帧）。
+                    shopConfirmClosedFrames = 1
+                    shopConfirmClosedAt = clock()
+                } else if (shopConfirmClosedFrames > 0) {
+                    shopConfirmClosedFrames++
+                    if (
+                        shopConfirmClosedFrames >= SHOP_CONFIRM_CANCEL_FRAMES &&
+                        clock() - shopConfirmClosedAt >= SHOP_CONFIRM_CANCEL_GRACE_MILLIS
+                    ) {
+                        // 连续多帧、且超过时间窗都回到「商店 + 无弹窗」：这次确认确实被取消了。
+                        pendingShopPurchase = null
+                        clearPlannedShopPurchase()
+                        shopConfirmClosedFrames = 0
+                        shopConfirmClosedAt = Long.MIN_VALUE
+                    }
                 }
                 null
             }
 
             LabyrinthShopDialogState.EXIT_CONFIRMATION -> {
+                shopConfirmClosedFrames = 0
+                shopConfirmClosedAt = Long.MIN_VALUE
                 pendingShopPurchase = null
                 null
             }
             null -> {
+                shopConfirmClosedFrames = 0
+                shopConfirmClosedAt = Long.MIN_VALUE
                 pendingShopPurchase = null
                 null
             }
@@ -9786,6 +9819,14 @@ class LabyrinthEntryRecognitionSession(
         /** Lost-tap retries allowed on a single-pick choice page before the run stops. */
         const val MAX_SELECTION_COMMIT_ATTEMPTS = 3
         const val SHOP_PURCHASE_TRANSITION_TIMEOUT_MILLIS = 8_000L
+        /**
+         * 确认弹窗关闭后，要连续看到这么多帧「商店 + 无弹窗」才认定是用户取消。
+         * 买到东西时游戏会先闪一帧商店再弹「购买完成」，设成 1 会误判并把购买计划清掉。
+         */
+        const val SHOP_CONFIRM_CANCEL_FRAMES = 2
+
+        /** 确认弹窗关闭后至少等这么久，才允许把「商店 + 无弹窗」当成取消（购买完成弹窗可能晚到）。 */
+        const val SHOP_CONFIRM_CANCEL_GRACE_MILLIS = 2_000L
         const val SHOP_REFRESH_TRANSITION_TIMEOUT_MILLIS = 8_000L
         const val SHOP_REFRESH_SETTLE_MILLIS = 500L
         const val CHARACTER_ACQUISITION_ACTION_INTERVAL_MILLIS = 650L
