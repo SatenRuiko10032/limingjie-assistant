@@ -47,6 +47,8 @@ data class LabyrinthUiState(
     val selectedAccount: AccountListItem? = null,
     val guildOptions: List<LabyrinthGuildOption> = LabyrinthRerollOptions.guilds,
     val selectedGuildId: Int = LabyrinthRerollOptions.DEFAULT_GUILD_ID,
+    /** 当前（或最后一次）刷开局任务实际使用的公会；单独刷开局的临时选择不回写 selectedGuildId。 */
+    val activeGuildId: Int? = null,
     val availableDifficulties: List<Int> = (1..LabyrinthRerollOptions.MAX_DIFFICULTY).toList(),
     val selectedDifficulty: Int = LabyrinthRerollOptions.DEFAULT_DIFFICULTY,
     val perfectStart: Boolean = LabyrinthRerollOptions.DEFAULT_PERFECT_START,
@@ -78,6 +80,7 @@ data class LabyrinthUiState(
 
 private data class LabyrinthChromeState(
     val selectedGuildId: Int = LabyrinthRerollOptions.DEFAULT_GUILD_ID,
+    val activeGuildId: Int? = null,
     val selectedDifficulty: Int = LabyrinthRerollOptions.DEFAULT_DIFFICULTY,
     val maxUnlockedDifficulty: Int? = null,
     val perfectStart: Boolean = LabyrinthRerollOptions.DEFAULT_PERFECT_START,
@@ -226,6 +229,12 @@ class LabyrinthController(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var settingsAccountId: Long? = null
     private var frozenStart: Pair<AccountListItem, LabyrinthRerollConfig>? = null
+
+    // 单独刷开局旁选的公会只对当次启动生效、不写回设置；但同一次启动内因战斗失败自动重刷时
+    // 必须沿用这个公会，否则会退回保存的设置（默认公会），把用户当次的选择覆盖掉。
+    private var lastStandaloneGuildId: Int? = null
+    private var lastStandaloneGuildAccountId: Long? = null
+
     private var startRequested = false
     private var cancellationMessage: String? = null
     val hasActiveReroll: Boolean get() = chrome.value.isWorking && frozenStart != null
@@ -249,6 +258,8 @@ class LabyrinthController(
                     startRequested = false
                     pendingLoginAction = null
                     explicitlyReadInitialOpening = null
+                    lastStandaloneGuildId = null
+                    lastStandaloneGuildAccountId = null
                     settingsAccountId = selectedAccountId
                     chrome.value = LabyrinthChromeState()
                     if (selectedAccountId != null) applySettings(settingsStore.load(selectedAccountId))
@@ -271,6 +282,7 @@ class LabyrinthController(
         LabyrinthUiState(
             selectedAccount = accounts.firstOrNull { it.isSelected && it.id == settingsAccountId },
             selectedGuildId = current.selectedGuildId,
+            activeGuildId = current.activeGuildId,
             availableDifficulties = (1..(
                 current.maxUnlockedDifficulty ?: LabyrinthRerollOptions.MAX_DIFFICULTY
                 )).toList(),
@@ -364,7 +376,14 @@ class LabyrinthController(
         }
         invalidateExplicitOpeningRead("单独刷开局即将改变服务端开局；完成后请重新读取")
         frozenStart = account to config
-        chrome.update { it.copy(startedAtMillis = System.currentTimeMillis()) }
+        lastStandaloneGuildId = launchGuildId
+        lastStandaloneGuildAccountId = account.id
+        chrome.update {
+            it.copy(
+                startedAtMillis = System.currentTimeMillis(),
+                activeGuildId = launchGuildId,
+            )
+        }
         requestFrozenStart()
     }
 
@@ -384,10 +403,20 @@ class LabyrinthController(
             return false
         }
         val config = parseConfig(account.id) ?: return false
-        frozenStart = account to config.copy(retireExisting = true, abandonExisting = true)
+        // 沿用同一次启动里临时选的公会；没有记录或记录失效时才退回保存的设置。
+        val carriedGuildId = lastStandaloneGuildId
+            ?.takeIf { lastStandaloneGuildAccountId == account.id }
+            ?.takeIf { id -> LabyrinthRerollOptions.guilds.any { it.guildId == id } }
+        val rerollConfig = if (carriedGuildId != null) {
+            labyrinthStandaloneRerollConfig(config, carriedGuildId)
+        } else {
+            config
+        }
+        frozenStart = account to rerollConfig.copy(retireExisting = true, abandonExisting = true)
         chrome.update {
             it.copy(
                 startedAtMillis = System.currentTimeMillis(),
+                activeGuildId = rerollConfig.guildId,
                 message = "连续3次战斗失败，正在撤退当前开局并重新刷取",
             )
         }
