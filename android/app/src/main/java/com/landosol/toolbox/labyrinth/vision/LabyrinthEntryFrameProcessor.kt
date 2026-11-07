@@ -471,6 +471,8 @@ class LabyrinthEntryFrameProcessor(
      * ignored rather than used, so a stale copy can never be scored.
      */
     private val preScaledTemplates: PreScaledEntryTemplates? = null,
+    /** Route context distinguishes real opening from the event/shop picker with the same shell. */
+    private val allowInitial1088GeometryRefinement: () -> Boolean = { false },
 ) {
     private val finalBossPlatformLocator = FinalBossPlatformLocator(
         nodeTemplates.templates["node.boss.platform"],
@@ -603,7 +605,11 @@ class LabyrinthEntryFrameProcessor(
                     else characterRecognizer.recognizeRoleRewardChoices(frame)
             } else if (observation.state == LabyrinthEntryPageState.INITIAL_CHARACTER_SELECTION) {
                 battleTeamNanos = measureNanoTime {
-                    openingCharacterSelection = battleTeamRecognizer.recognizeOpening(frame)
+                    openingCharacterSelection = battleTeamRecognizer.recognizeOpening(
+                        frame,
+                        allowInitial1088GeometryRefinement = allowInitial1088GeometryRefinement() &&
+                            labyrinthOpeningRosterOwnsInitialSelection(anchorScores, MATCHED_FEATURE_MIN_SCORE),
+                    )
                 }
                 openingCharacterMatches = openingCharacterSelection?.visibleCharacters.orEmpty()
             }

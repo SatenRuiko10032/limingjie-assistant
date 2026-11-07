@@ -123,6 +123,15 @@ internal fun labyrinthBattleRosterVisualFingerprint(
     return hash
 }
 
+internal fun labyrinthShouldRefineInitial1088Card(
+    allowed: Boolean,
+    trusted: Boolean,
+    suspectedCharacterId: String?,
+    screenFullyVisible: Boolean,
+    recognitionFullyVisible: Boolean,
+): Boolean = allowed && !trusted && suspectedCharacterId == "1088" &&
+    screenFullyVisible && recognitionFullyVisible
+
 /**
  * Observes the battle-before-team-selection page. The page has a fixed 1920x1080 layout, while
  * the character artwork and the selected check marks are dynamic. Stable controls are measured
@@ -158,6 +167,7 @@ class LabyrinthBattleTeamRecognizer(
     private var stableObservation: LabyrinthBattleTeamObservation? = null
     private var viewportRevision = 0L
 
+    private var openingGeometryRefinementMode = false
     private var openingStableSignature: Long? = null
     private var openingPendingSignature: Long? = null
     private var openingPendingStableFrames = 0
@@ -203,6 +213,7 @@ class LabyrinthBattleTeamRecognizer(
         pendingStableFrames = 0
         stableObservation = null
         viewportRevision = 0L
+        openingGeometryRefinementMode = false
         openingStableSignature = null
         openingPendingSignature = null
         openingPendingStableFrames = 0
@@ -225,12 +236,23 @@ class LabyrinthBattleTeamRecognizer(
      * cache so opening coordinates never inherit the battle editor's two-row clipping rules.
      */
     @Synchronized
-    fun recognizeOpening(frame: PixelImage): LabyrinthBattleTeamObservation {
+    fun recognizeOpening(
+        frame: PixelImage,
+        allowInitial1088GeometryRefinement: Boolean = false,
+    ): LabyrinthBattleTeamObservation {
+        if (openingGeometryRefinementMode != allowInitial1088GeometryRefinement) {
+            // Never inherit recovered identities across real-opening and event/shop modes.
+            openingStableSignature = null
+            openingPendingSignature = null
+            openingPendingStableFrames = 0
+            openingStableObservation = null
+            openingGeometryRefinementMode = allowInitial1088GeometryRefinement
+        }
         val layout = measureLayout(frame, OPENING_LAYOUT_PROFILE)
         val signature = viewportSignature(frame, layout)
         val cached = openingStableObservation
         if (cached == null) {
-            openingViewportRevision = 1L
+            openingViewportRevision = (openingViewportRevision + 1L).coerceAtLeast(1L)
             return recognizeOpeningStable(frame, layout, signature)
         }
         if (signature == openingStableSignature) {
@@ -269,8 +291,11 @@ class LabyrinthBattleTeamRecognizer(
         return recognizeOpeningStable(frame, layout, signature)
     }
 
-    fun recognizeOpeningCharacters(frame: PixelImage): List<LabyrinthBattleCharacterMatch> =
-        recognizeOpening(frame).visibleCharacters
+    fun recognizeOpeningCharacters(
+        frame: PixelImage,
+        allowInitial1088GeometryRefinement: Boolean = false,
+    ): List<LabyrinthBattleCharacterMatch> =
+        recognizeOpening(frame, allowInitial1088GeometryRefinement).visibleCharacters
 
     /** Boss editor has one gold selected tab and two white tabs, above the lowered filter bar. */
     internal fun detectBossTeamIndex(frame: PixelImage): Int? {
@@ -430,6 +455,7 @@ class LabyrinthBattleTeamRecognizer(
                 topRow = true,
                 openingCard = true,
                 viewport = OPENING_LAYOUT_PROFILE.viewport,
+                allowInitial1088GeometryRefinement = openingGeometryRefinementMode,
             )
             val previous = reusableMatches[slot.id]
             if (observed?.selected == true && previous?.trusted == true) {
@@ -944,6 +970,7 @@ class LabyrinthBattleTeamRecognizer(
         topRow: Boolean,
         openingCard: Boolean,
         viewport: EntryReferenceRect,
+        allowInitial1088GeometryRefinement: Boolean = false,
     ): LabyrinthBattleCharacterMatch? {
         val screenRect = mapSlotRect(frame, slot) ?: return null
         val recognitionRect = slot.recognitionRect ?: screenRect
@@ -1080,12 +1107,16 @@ class LabyrinthBattleTeamRecognizer(
                 } else null
             }
         }
-        // Previously only an already-selected member paid for geometry refinement. That leaves a
-        // permanently ambiguous *available* card able to deadlock the effective-effect scan,
-        // because that scan intentionally refuses to omit an unknown effective role. Refine every
-        // real battle-editor card that failed the primary match, while opening-selector cards keep
-        // their dedicated clipped-card geometry path above.
-        if (!openingCard && !character.trusted) {
+        // Keep battle-editor recovery unchanged. Only a failed, fully visible suspected 1088
+        // pays for recovery in a route-confirmed real opening; event/shop pickers remain excluded.
+        val refineInitial1088 = labyrinthShouldRefineInitial1088Card(
+            allowed = openingCard && allowInitial1088GeometryRefinement,
+            trusted = character.trusted,
+            suspectedCharacterId = character.suspectedCharacterId,
+            screenFullyVisible = visibleScreenRect == screenRect,
+            recognitionFullyVisible = visibleRecognitionRect == recognitionRect,
+        ) && openingRecoveryFitsViewport(frame, iconRect, viewport)
+        if (!character.trusted && (!openingCard || refineInitial1088)) {
             character = iconMatcher.refineMemberGeometry(
                 frame = frame,
                 iconRect = iconRect,
@@ -1112,6 +1143,24 @@ class LabyrinthBattleTeamRecognizer(
             suspectedDisplayName = character.suspectedDisplayName,
             detectedAttribute = requiredAttribute,
         )
+    }
+
+    private fun openingRecoveryFitsViewport(
+        frame: PixelImage,
+        iconRect: EntryPixelRect,
+        viewport: EntryReferenceRect,
+    ): Boolean {
+        // Match the standard roundToInt used by the icon matcher (not this file's ties-to-even helper).
+        val radius = kotlin.math.floor(iconRect.width / 90.0 + 0.5).toInt().coerceIn(1, 3)
+        if (iconRect.left < radius || iconRect.top < radius) return false
+        val expanded = EntryPixelRect(
+            iconRect.left - radius, iconRect.top - radius,
+            iconRect.width + radius * 2, iconRect.height + radius * 2,
+        )
+        // This enclosing box covers every bounded candidate and prevents sampling panel chrome.
+        return expanded.left + expanded.width <= frame.width &&
+            expanded.top + expanded.height <= frame.height &&
+            clipCardToViewport(frame, expanded, viewport) == expanded
     }
 
     private fun recognizeCardAttribute(

@@ -268,6 +268,9 @@ class LandosolToolboxApplication : Application() {
                     nodeScanConsumable = { labyrinthEntryRecognitionSession.nodeScanConsumable() },
                     rosterCharacterIds = { labyrinthEntryRecognitionSession.rosterCharacterIds() },
                     captureFrameSize = CaptureStateRegistry::captureSize,
+                    eventChoiceOverrides = labyrinthEntryRecognitionSession.eventChoiceOverridesSnapshot,
+                    eventCustomizationEnabled = labyrinthEntryRecognitionSession.eventCustomizationEnabledSnapshot,
+                    allowInitial1088GeometryRefinement = { labyrinthEntryRecognitionSession.allowInitial1088GeometryRefinement() },
                 )::process
             },
             captureStop = { MediaProjectionCaptureService.stop(this) },

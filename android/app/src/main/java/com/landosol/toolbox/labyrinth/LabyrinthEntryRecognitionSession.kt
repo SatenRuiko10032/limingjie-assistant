@@ -1228,6 +1228,21 @@ class LabyrinthEntryRecognitionSession(
         .map(LabyrinthJoinedCharacter::characterId)
         .toSet()
 
+    fun allowInitial1088GeometryRefinement(): Boolean {
+        val routeState = nodeSession?.getState()
+        val route = validatedRoute
+        return labyrinthAllowsInitial1088GeometryRefinement(
+            routeState = routeState,
+            persistedNode = labyrinthPersistedCurrentNode(route) ?: routeState?.currentNodeId?.let { id ->
+                route?.nodes?.firstOrNull { it.blockId == id }
+            },
+            hasNodeTransition = pendingNodeTransition != null || confirmedNodeEntryReceipt != null,
+            activeNodeType = activeNodeType,
+            shopChoiceImprintPending = shopChoiceImprintRolePending,
+            initialStartExecuted = initialStartExecuted && !entryPhaseComplete,
+        )
+    }
+
     fun currentNodeSearchHint(): NodeSearchHint? {
         val session = nodeSession ?: return null
         val target = session.currentRouteTarget() ?: return null
@@ -1484,6 +1499,12 @@ class LabyrinthEntryRecognitionSession(
     var skipRoleRewardJoinedRecognition: Boolean = false
         private set
     private var roleRewardDecisionCacheKey: String? = null
+    /** Controls every custom event path; false preserves the pre-customization event flow. */
+    var eventCustomizationEnabledSnapshot: Boolean = false
+        private set
+    /** The same immutable start snapshot used by the event planner and title resolver. */
+    var eventChoiceOverridesSnapshot: Map<String, String> = emptyMap()
+        private set
     @Volatile
     private var pendingShopPurchase: LabyrinthRelicMatch? = null
     @Volatile
@@ -1553,6 +1574,8 @@ class LabyrinthEntryRecognitionSession(
     private var finalBossLocalizationStartedAt = Long.MIN_VALUE
     @Volatile
     private var entryPhaseComplete = false
+    @Volatile
+    private var initialStartExecuted = false
     @Volatile
     private var pendingNodeClickBlockId: Long = Long.MIN_VALUE
     @Volatile
@@ -1819,6 +1842,8 @@ class LabyrinthEntryRecognitionSession(
         singleBossRetryCountBeforeMulti = 2
         pendingSingleBossFallbackToMulti = false
         bossFallbackMultiTeamActive = false
+        eventCustomizationEnabledSnapshot = strategySnapshot?.settings?.eventCustomizationEnabled == true
+        eventChoiceOverridesSnapshot = strategySnapshot?.settings?.effectiveEventChoiceOverrides()?.toMap().orEmpty()
         strategySnapshot?.let { snapshot ->
             configuredBossTeamMode = snapshot.settings.bossTeamMode
             bossTeamMode = configuredBossTeamMode
@@ -4123,6 +4148,9 @@ class LabyrinthEntryRecognitionSession(
             }
             when (result) {
                 is AutomationActionResult.Executed -> {
+                    if (activeSessionId == sessionId && decision.kind == LabyrinthEntryActionKind.START_DAWN_REALM) {
+                        initialStartExecuted = true
+                    }
                     if (decision.kind == LabyrinthEntryActionKind.RESUME_DAWN_REALM) {
                         // The next page may be the node map, a choice page, or an unfinished
                         // CHARACTER_JOINED reward from before the app/session was restarted.
@@ -5691,9 +5719,13 @@ class LabyrinthEntryRecognitionSession(
                         nodeLog("event-choice-refused id=$rejected rejected=$eventChoiceRejectedIds", warning = true)
                     }
                     eventChoiceCommittedChoiceId = null
+                    if (eventCustomizationEnabledSnapshot) refreshEventChoiceDecision(sessionId, result)
                 }
                 when (val decision = _state.value.eventChoiceDecision) {
-                    is LabyrinthEventChoiceDecision.Select -> if (decision.actionSafe) {
+                    is LabyrinthEventChoiceDecision.Select -> if (
+                        decision.actionSafe &&
+                            (!eventCustomizationEnabledSnapshot || decision.choiceId !in eventChoiceRejectedIds)
+                    ) {
                         LabyrinthPostEntryTapPlan(
                             LabyrinthPostEntryActionKind.SELECT_EVENT,
                             "选择事件：${decision.choiceId} ${decision.label}；${decision.explanation}",
@@ -5703,7 +5735,9 @@ class LabyrinthEntryRecognitionSession(
                         null
                     }
                     is LabyrinthEventChoiceDecision.Wait -> null
-                    null -> labyrinthSingleChoiceEventButtonRect(result)?.let { rect ->
+                    null -> labyrinthSingleChoiceEventButtonRect(
+                        result, eventCustomizationEnabled = eventCustomizationEnabledSnapshot,
+                    )?.let { rect ->
                         nodeLog("event-choice-fallback source=SINGLE_CHOICE_ANCHORS rect=$rect " +
                             "layoutCount=${result.eventOcrDiagnostics?.completeLayoutCount} " +
                             "ocr=${result.eventOcrDiagnostics?.status} " +
@@ -7047,6 +7081,12 @@ class LabyrinthEntryRecognitionSession(
         eventFreeRoleConfirmIds: List<String> = emptyList(),
     ) {
         if (!beginGuardedAction()) return
+        val dispatchedEventChoiceId = if (eventCustomizationEnabledSnapshot &&
+            kind == LabyrinthPostEntryActionKind.SELECT_EVENT
+        ) {
+            (_state.value.eventChoiceDecision as? LabyrinthEventChoiceDecision.Select)
+                ?.takeIf { it.buttonRect == rect }?.choiceId
+        } else null
         val selectedReward = (_state.value.roleRewardChoiceDecision as? LabyrinthRoleRewardChoiceDecision.Select)
             ?.takeIf { it.characterId == roleRewardSelectedCharacterId && it.actionSafe }
         val selectedRewardAccountId = activeRunAccountId
@@ -7105,8 +7145,11 @@ class LabyrinthEntryRecognitionSession(
                     if (kind == LabyrinthPostEntryActionKind.SELECT_EVENT) {
                         eventChoiceCommitted = true
                         eventChoiceCommittedAt = clock()
-                        eventChoiceCommittedChoiceId =
+                        eventChoiceCommittedChoiceId = if (eventCustomizationEnabledSnapshot) {
+                            dispatchedEventChoiceId
+                        } else {
                             (_state.value.eventChoiceDecision as? LabyrinthEventChoiceDecision.Select)?.choiceId
+                        }
                     }
                     if (kind == LabyrinthPostEntryActionKind.SELECT_RELIC) {
                         relicChoiceCommitted = true
@@ -7325,6 +7368,7 @@ class LabyrinthEntryRecognitionSession(
         nodeInitFailedReason = null
         finalBossLocalizationStartedAt = Long.MIN_VALUE
         entryPhaseComplete = false
+        initialStartExecuted = false
         resetPendingNodeClickStability()
         resetStrongRouteTargetBinding()
         pendingNodeTransition = null
