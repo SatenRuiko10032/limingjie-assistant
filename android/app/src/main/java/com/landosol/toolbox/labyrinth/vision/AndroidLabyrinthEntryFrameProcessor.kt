@@ -292,6 +292,9 @@ class AndroidLabyrinthEntryFrameProcessor private constructor(
              * original templates and the per-score mapping.
              */
             captureFrameSize: () -> Pair<Int, Int>? = { null },
+            eventChoiceOverrides: Map<String, String> = emptyMap(),
+            eventCustomizationEnabled: Boolean = false,
+            allowInitial1088GeometryRefinement: () -> Boolean = { false },
         ): AndroidLabyrinthEntryFrameProcessor {
             val entryTemplates = AndroidLabyrinthEntryTemplateLoader(context).load()
             val preScaledTemplates = captureFrameSize()?.let { (width, height) ->
@@ -324,11 +327,14 @@ class AndroidLabyrinthEntryFrameProcessor private constructor(
                         relicTemplates = relicTemplates,
                     ),
                     preScaledTemplates = preScaledTemplates,
+                    allowInitial1088GeometryRefinement = allowInitial1088GeometryRefinement,
                 ),
                 exEncounterResolver = AndroidLabyrinthExEncounterResolver(),
                 eventChoiceResolver = runCatching {
                     AndroidLabyrinthEventChoiceResolver(
                         AndroidLabyrinthEventRecognitionDataLoader(context).load(),
+                        eventChoiceOverrides = eventChoiceOverrides,
+                        eventCustomizationEnabled = eventCustomizationEnabled,
                     )
                 }.getOrNull(),
                 shopItemResolver = AndroidLabyrinthShopItemResolver(),

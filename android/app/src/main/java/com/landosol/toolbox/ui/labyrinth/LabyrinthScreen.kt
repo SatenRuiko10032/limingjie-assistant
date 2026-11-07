@@ -43,6 +43,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.mapSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -95,7 +96,6 @@ fun LabyrinthScreen(
     onCaptchaSolved: (String) -> Unit,
     onCaptchaError: (String) -> Unit,
     onCancelCaptcha: () -> Unit,
-    onOpenStrategies: () -> Unit = {},
 ) {
     val configuration = LocalConfiguration.current
     val compactWidth = configuration.screenWidthDp < 600
@@ -144,12 +144,6 @@ fun LabyrinthScreen(
                     ) {
                         Text(
                             if (compactWidth) "刷取" else "刷开局设置",
-                            style = MaterialTheme.typography.labelLarge,
-                        )
-                    }
-                    TextButton(onClick = onOpenStrategies) {
-                        Text(
-                            if (compactWidth) "策略" else "策略设置",
                             style = MaterialTheme.typography.labelLarge,
                         )
                     }
@@ -725,6 +719,27 @@ private fun EntryRecognitionCard(
     }
 }
 
+internal fun encodeBatchTargetCounts(counts: Map<Int, String>): Map<String, Any> =
+    counts.mapKeys { it.key.toString() }
+
+internal fun decodeBatchTargetCounts(saved: Map<String, Any?>): Map<Int, String> =
+    saved.entries.associate { (id, value) -> id.toInt() to value as String }
+
+internal fun encodeBatchTargetModes(modes: Map<Int, LabyrinthBatchGoalMode>): Map<String, Any> =
+    modes.entries.associate { (id, mode) -> id.toString() to mode.name }
+
+internal fun decodeBatchTargetModes(saved: Map<String, Any?>): Map<Int, LabyrinthBatchGoalMode> =
+    saved.entries.associate { (id, value) -> id.toInt() to LabyrinthBatchGoalMode.valueOf(value as String) }
+
+private val BatchTargetCountsSaver = mapSaver(
+    save = { counts: Map<Int, String> -> encodeBatchTargetCounts(counts) },
+    restore = ::decodeBatchTargetCounts,
+)
+private val BatchTargetModesSaver = mapSaver(
+    save = { modes: Map<Int, LabyrinthBatchGoalMode> -> encodeBatchTargetModes(modes) },
+    restore = ::decodeBatchTargetModes,
+)
+
 @Composable
 private fun BatchRunCard(
     state: LabyrinthUiState,
@@ -764,11 +779,11 @@ private fun BatchRunCard(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.primary,
         )
-        // Per-guild target text and mode; the guild list itself is fixed (top five).
-        val counts = remember(guildOptions) {
+        // Keep unstarted batch inputs when visiting the independent strategy destination.
+        val counts = rememberSaveable(guildOptions, stateSaver = BatchTargetCountsSaver) {
             mutableStateOf(guildOptions.associate { it.guildId to "" })
         }
-        val modes = remember(guildOptions) {
+        val modes = rememberSaveable(guildOptions, stateSaver = BatchTargetModesSaver) {
             mutableStateOf(guildOptions.associate { it.guildId to LabyrinthBatchGoalMode.CLEARS })
         }
 
