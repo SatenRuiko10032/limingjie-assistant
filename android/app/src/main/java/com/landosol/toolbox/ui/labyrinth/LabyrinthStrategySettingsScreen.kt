@@ -120,7 +120,7 @@ fun LabyrinthStrategySettingsScreen(
                     StrategyNumber("系统：阵型", draft.formationWeight, 0..100, "", !saving) { draft = draft.copy(formationWeight = it) }
                     StrategyNumber("系统：协同", draft.cohesionWeight, 0..100, "", !saving) { draft = draft.copy(cohesionWeight = it) }
                     StrategySwitch(
-                        "属性配对增伤",
+                        "属性配队增伤",
                         "关闭后角色属性仍会识别，并继续用于筛选/显示；只是评分时不再计算同属性 2/3/4/5 人的 8/16/25/75% 伤害加成。",
                         draft.attributePairingBonusEnabled,
                         !saving,
@@ -265,19 +265,17 @@ fun LabyrinthStrategySettingsScreen(
                     ) { draft = draft.copy(responseIntervalMillis = it) }
                 }
                 StrategySection("特别装备", specialEquipmentSummary(draft), section, { section = it }) {
-                    Text(
-                        "自动穿戴会在队伍编组页点开「特别装备」并尝试自动穿戴，只对下面勾选的关卡类型生效；" +
-                            "是否执行按本次启动读取的设置快照判定，运行中保存只影响下一次启动。",
-                    )
+                    Text("自动穿戴会在队伍编组页点开「特别装备」并尝试自动穿戴，只对下面勾选的关卡类型生效", style = MaterialTheme.typography.bodySmall)
+                    Text("是否执行按本次启动读取的设置快照判定，运行中保存只影响下一次启动", style = MaterialTheme.typography.bodySmall)
                     StrategyRadioChoice(
                         label = "关闭",
-                        detail = "默认。本次编组页不会为特别装备产生任何额外点击。",
+                        detail = "默认，本次编组页不会为特别装备产生任何额外点击",
                         selected = draft.specialEquipmentMode == LabyrinthSpecialEquipmentMode.OFF,
                         enabled = !saving,
                     ) { draft = draft.copy(specialEquipmentMode = LabyrinthSpecialEquipmentMode.OFF) }
                     StrategyRadioChoice(
                         label = "自动穿戴",
-                        detail = "只在队伍编组页执行，且仅限下面勾选的关卡类型。",
+                        detail = "只在队伍编组页执行，且仅限下面勾选的关卡类型",
                         selected = draft.specialEquipmentMode == LabyrinthSpecialEquipmentMode.AUTO_EQUIP,
                         enabled = !saving,
                     ) { draft = draft.copy(specialEquipmentMode = LabyrinthSpecialEquipmentMode.AUTO_EQUIP) }

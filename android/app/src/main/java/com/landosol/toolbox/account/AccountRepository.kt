@@ -49,6 +49,7 @@ class AccountRepository(
     private val sessionStore: SdkSessionStore,
     private val gameSessionRegistry: GameSessionRegistry,
     private val clock: () -> Long = System::currentTimeMillis,
+    private val configurationGate: com.landosol.toolbox.automation.TaskConfigurationGate = com.landosol.toolbox.automation.TaskConfigurationGate(),
 ) {
     fun observeAccounts(): Flow<List<AccountListItem>> = database.accountDao().observeAll().map { accounts ->
         accounts.map { entity ->
@@ -103,6 +104,11 @@ class AccountRepository(
     }
 
     suspend fun create(input: NormalizedAccountInput): Long {
+        val admission = checkNotNull(configurationGate.tryBeginTask()) { com.landosol.toolbox.automation.TaskConfigurationGate.TRANSFER_MESSAGE }
+        return try { createAdmitted(input) } finally { admission.close() }
+    }
+
+    private suspend fun createAdmitted(input: NormalizedAccountInput): Long {
         val credentialKey = UUID.randomUUID().toString()
         credentialStore.save(credentialKey, AccountCredentials(input.loginId, input.password))
         return try {
@@ -127,6 +133,11 @@ class AccountRepository(
     }
 
     suspend fun update(id: Long, input: NormalizedAccountInput) {
+        val admission = checkNotNull(configurationGate.tryBeginTask()) { com.landosol.toolbox.automation.TaskConfigurationGate.TRANSFER_MESSAGE }
+        try { updateAdmitted(id, input) } finally { admission.close() }
+    }
+
+    private suspend fun updateAdmitted(id: Long, input: NormalizedAccountInput) {
         val account = requireNotNull(database.accountDao().getById(id)) { "账号不存在" }
         // 凭据含义随服务器而变（B 服密码 / 渠道服 access_key）：换服务器必须同时给出新密码，
         // 且旧服务器的 SDK / 游戏会话一律作废。
@@ -159,7 +170,8 @@ class AccountRepository(
     }
 
     suspend fun select(id: Long) {
-        database.accountDao().selectAccount(id, clock())
+        val admission = checkNotNull(configurationGate.tryBeginTask()) { com.landosol.toolbox.automation.TaskConfigurationGate.TRANSFER_MESSAGE }
+        try { database.accountDao().selectAccount(id, clock()) } finally { admission.close() }
     }
 
     suspend fun updateGameUid(id: Long, gameUid: String) {
@@ -169,6 +181,11 @@ class AccountRepository(
     }
 
     suspend fun delete(id: Long) {
+        val admission = checkNotNull(configurationGate.tryBeginTask()) { com.landosol.toolbox.automation.TaskConfigurationGate.TRANSFER_MESSAGE }
+        try { deleteAdmitted(id) } finally { admission.close() }
+    }
+
+    private suspend fun deleteAdmitted(id: Long) {
         val account = requireNotNull(database.accountDao().getById(id)) { "账号不存在" }
         val previous = credentialStore.read(account.credentialKey)
         val previousSession = sessionStore.read(account.credentialKey)

@@ -1,6 +1,5 @@
 package com.landosol.toolbox.labyrinth
 
-import android.content.Context
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -57,16 +56,6 @@ fun LabyrinthUiState.rerollSettings() = LabyrinthRerollSettings(
 interface LabyrinthRerollSettingsStore {
     fun load(accountId: Long): LabyrinthRerollSettings
     fun save(accountId: Long, settings: LabyrinthRerollSettings)
-}
-
-class AndroidLabyrinthRerollSettingsStore(context: Context) : LabyrinthRerollSettingsStore {
-    private val preferences = context.applicationContext.getSharedPreferences("labyrinth-reroll-settings", Context.MODE_PRIVATE)
-    private val storage = JsonLabyrinthRerollSettingsStore(
-        read = { key -> preferences.getString(key, null) },
-        write = { key, value -> preferences.edit().putString(key, value).apply() },
-    )
-    override fun load(accountId: Long) = storage.load(accountId)
-    override fun save(accountId: Long, settings: LabyrinthRerollSettings) = storage.save(accountId, settings)
 }
 
 internal class JsonLabyrinthRerollSettingsStore(

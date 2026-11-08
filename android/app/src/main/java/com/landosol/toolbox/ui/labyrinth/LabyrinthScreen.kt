@@ -763,6 +763,7 @@ private fun BatchRunCard(
         LabyrinthBatchStage.RUNNING_LABYRINTH,
         LabyrinthBatchStage.RECORDING_RESULT,
     )
+    val pausedPending = checkpoint?.stage == LabyrinthBatchStage.PAUSED && haltReason != LabyrinthBatchHaltReason.USER_STOPPED
     Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
         WorkflowStepHeader(
             number = "2",
@@ -824,8 +825,8 @@ private fun BatchRunCard(
             )
         }
 
-        if (active) {
-            Button(onClick = onStop) { Text("停止批量执行") }
+        if (active || pausedPending) {
+            Button(onClick = onStop) { Text(if (pausedPending) "停止待续批次" else "停止批量执行") }
         } else {
             Text("执行目标（留空 = 跳过该公会）", style = MaterialTheme.typography.titleSmall)
             @Composable
