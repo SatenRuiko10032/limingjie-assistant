@@ -222,6 +222,7 @@ class LabyrinthController(
     private val beforeRerollLogin: suspend (accountId: Long) -> String? = { null },
     /** Runs after a standalone (non-batch) reroll ends; the batch cold-starts the client itself. */
     private val afterStandaloneReroll: suspend (accountId: Long) -> Unit = {},
+    private val configurationGate: com.landosol.toolbox.automation.TaskConfigurationGate = com.landosol.toolbox.automation.TaskConfigurationGate(),
 ) {
     // 缺少国服游戏包时，首页构造本 Controller 不应触发 BilibiliSDK 的包查询。
     // 协调器改为按需解析：仅在登录/验证码等真实操作走到时才求值。
@@ -238,9 +239,26 @@ class LabyrinthController(
     private var startRequested = false
     private var cancellationMessage: String? = null
     val hasActiveReroll: Boolean get() = chrome.value.isWorking && frozenStart != null
+    val blocksConfigurationTransfer: Boolean get() = chrome.value.isWorking || chrome.value.captcha != null ||
+        startRequested || frozenStart != null || runningJob?.isCompleted == false
+    val configurationAccountId: Long? get() = settingsAccountId
+    fun importedDifficultyError(accountId: Long, difficulty: Int): String? =
+        if (settingsAccountId == accountId && chrome.value.maxUnlockedDifficulty?.let { difficulty > it } == true) {
+            "所选难度尚未解锁"
+        } else null
+
+    private fun configurationAdmission(): com.landosol.toolbox.automation.TaskConfigurationGate.Lease? =
+        configurationGate.tryBeginTask().also {
+            if (it == null) reportMessage(com.landosol.toolbox.automation.TaskConfigurationGate.TRANSFER_MESSAGE)
+        }
 
     private val chrome = MutableStateFlow(LabyrinthChromeState())
     private var runningJob: Job? = null
+        set(value) {
+            field = value
+            configurationGate.refreshAvailability()
+            value?.invokeOnCompletion { configurationGate.refreshAvailability() }
+        }
     private var pendingLoginAction: PendingLoginAction? = null
     @Volatile
     private var explicitlyReadInitialOpening:
@@ -355,6 +373,11 @@ class LabyrinthController(
     }
 
     fun start(retreatConfirmed: Boolean = false, guildIdOverride: Int? = null) {
+        val admission = configurationAdmission() ?: return
+        try { startAdmitted(retreatConfirmed, guildIdOverride) } finally { admission.close() }
+    }
+
+    private fun startAdmitted(retreatConfirmed: Boolean, guildIdOverride: Int?) {
         if (chrome.value.isWorking || chrome.value.captcha != null || !chrome.value.settingsReady) return
         val account = uiState.value.selectedAccount
         if (account == null) {
@@ -393,6 +416,11 @@ class LabyrinthController(
      * one frozen task while preserving all other saved reroll criteria (v2/allowance/Boss/etc.).
      */
     fun startAfterBattleFailureReroll(accountId: Long): Boolean {
+        val admission = configurationAdmission() ?: return false
+        return try { startAfterBattleFailureRerollAdmitted(accountId) } finally { admission.close() }
+    }
+
+    private fun startAfterBattleFailureRerollAdmitted(accountId: Long): Boolean {
         if (chrome.value.isWorking || chrome.value.captcha != null || !chrome.value.settingsReady) {
             reportMessage("战斗失败后无法自动重刷：刷开局任务尚未就绪或已有任务运行")
             return false
@@ -425,6 +453,11 @@ class LabyrinthController(
     }
 
     private fun requestFrozenStart() {
+        val admission = configurationAdmission() ?: return
+        try { requestFrozenStartAdmitted() } finally { admission.close() }
+    }
+
+    private fun requestFrozenStartAdmitted() {
         if (frozenStart == null || chrome.value.isWorking) return
         startRequested = true
         chrome.update { it.copy(isWorking = true, progress = "正在启动后台刷取服务", message = null) }
@@ -449,6 +482,14 @@ class LabyrinthController(
         accountId: Long,
         guildId: Int,
         difficulty: Int,
+    ): com.landosol.toolbox.labyrinth.batch.LabyrinthBatchRerollResult {
+        val admission = configurationAdmission() ?: return com.landosol.toolbox.labyrinth.batch.LabyrinthBatchRerollResult.Failure(
+            com.landosol.toolbox.automation.TaskConfigurationGate.TRANSFER_MESSAGE)
+        return try { rerollForBatchAdmitted(accountId, guildId, difficulty) } finally { admission.close() }
+    }
+
+    private suspend fun rerollForBatchAdmitted(
+        accountId: Long, guildId: Int, difficulty: Int,
     ): com.landosol.toolbox.labyrinth.batch.LabyrinthBatchRerollResult {
         val failure = { message: String -> com.landosol.toolbox.labyrinth.batch.LabyrinthBatchRerollResult.Failure(message) }
         if (chrome.value.isWorking || chrome.value.captcha != null || !chrome.value.settingsReady) {
@@ -665,6 +706,11 @@ class LabyrinthController(
     }
 
     fun checkStatus() {
+        val admission = configurationAdmission() ?: return
+        try { checkStatusAdmitted() } finally { admission.close() }
+    }
+
+    private fun checkStatusAdmitted() {
         if (chrome.value.isWorking || chrome.value.captcha != null || !chrome.value.settingsReady) return
         val account = uiState.value.selectedAccount
         if (account == null) {
@@ -960,6 +1006,11 @@ class LabyrinthController(
     }
 
     fun submitCaptcha(validate: String) {
+        val admission = configurationAdmission() ?: return
+        try { submitCaptchaAdmitted(validate) } finally { admission.close() }
+    }
+
+    private fun submitCaptchaAdmitted(validate: String) {
         val captcha = chrome.value.captcha ?: return
         if (chrome.value.isWorking) return
         val loginAction = pendingLoginAction
@@ -1099,9 +1150,10 @@ class LabyrinthController(
         frozenStart = null
         pendingLoginAction = null
         explicitlyReadInitialOpening = null
-        runningJob?.cancel()
+        val stoppedJob = runningJob
+        stoppedJob?.cancel()
         // Cancellation is asynchronous: keep controls locked until the job's finally has finished.
-        if (runningJob == null) chrome.update { it.copy(isWorking = false, progress = null) }
+        if (stoppedJob == null) chrome.update { it.copy(isWorking = false, progress = null) }
         // cancelCaptcha must read pendingLoginAction before it is cleared, otherwise a stopped
         // CHECK_STATUS captcha remains displayed forever as "waiting for verification".
         if (chrome.value.captcha != null) cancelCaptcha() else pendingLoginAction = null
@@ -1116,13 +1168,29 @@ class LabyrinthController(
     fun reportMessage(message: String) { chrome.update { it.copy(message = message) } }
 
     fun saveSettings(settings: LabyrinthRerollSettings) {
+        val admission = configurationAdmission() ?: return
+        try { saveSettingsAdmitted(settings) } finally { admission.close() }
+    }
+
+    private fun saveSettingsAdmitted(settings: LabyrinthRerollSettings) {
         if (chrome.value.isWorking || chrome.value.captcha != null) return
         val accountId = settingsAccountId ?: return
         settings.validationError()?.let { reportMessage(it); return }
         if (settings.difficulty > (chrome.value.maxUnlockedDifficulty ?: LabyrinthRerollOptions.MAX_DIFFICULTY)) {
             reportMessage("所选难度尚未解锁"); return
         }
-        settingsStore.save(accountId, settings)
+        try {
+            settingsStore.save(accountId, settings)
+        } catch (failure: Exception) {
+            reportMessage(failure.message ?: "刷开局设置保存失败")
+            return
+        }
+        onConfigurationImported(accountId, settings)
+    }
+
+    /** Invalidates the old opening verdict only after a complete configuration commit. */
+    fun onConfigurationImported(accountId: Long, settings: LabyrinthRerollSettings) {
+        if (accountId != settingsAccountId) return
         explicitlyReadInitialOpening = null
         applySettings(settings)
         // A prior TARGET verdict was evaluated against the old difficulty/route policy.
@@ -1267,12 +1335,20 @@ class LabyrinthController(
     }
 
     private fun updateConfig(transform: LabyrinthChromeState.() -> LabyrinthChromeState) {
-        if (!chrome.value.isWorking && chrome.value.captcha == null && chrome.value.settingsReady) {
-            explicitlyReadInitialOpening = null
-            chrome.update { it.transform().copy(message = null) }
-            val settings = uiSettings()
-            if (settings.validationError() == null) settingsAccountId?.let { settingsStore.save(it, settings) }
-        }
+        val admission = configurationAdmission() ?: return
+        try {
+            if (!chrome.value.isWorking && chrome.value.captcha == null && chrome.value.settingsReady) {
+                val previous = chrome.value
+                explicitlyReadInitialOpening = null
+                chrome.update { it.transform().copy(message = null) }
+                val settings = uiSettings()
+                try {
+                    if (settings.validationError() == null) settingsAccountId?.let { settingsStore.save(it, settings) }
+                } catch (failure: Exception) {
+                    chrome.value = previous.copy(message = failure.message ?: "配置保存失败，原配置未变")
+                }
+            }
+        } finally { admission.close() }
     }
 
     private fun updateNumeric(transform: LabyrinthChromeState.() -> LabyrinthChromeState) {

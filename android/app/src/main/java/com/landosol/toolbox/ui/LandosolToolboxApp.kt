@@ -187,7 +187,9 @@ fun LandosolToolboxApp() {
         { handler -> strategyLeaveHandler = handler }
     }
     val requestNavigation: (AppScreen) -> Unit = { target ->
-        if (target != screen) {
+        if (application.taskConfigurationGate.state.value.transferring) {
+            labyrinthViewModel.reportMessage("正在处理配置分享码，请稍后再切换页面")
+        } else if (target != screen) {
             val navigate = { screenName = target.name }
             if (screen == AppScreen.Strategies) {
                 strategyLeaveHandler?.invoke(navigate)
@@ -304,6 +306,24 @@ private const val CAPTURE_START_TIMEOUT_MILLIS = 5_000L
 @Composable
 private fun PermissionRoute() {
     val context = LocalContext.current
+    val application = context.applicationContext as LandosolToolboxApplication
+    var sharing by rememberSaveable { mutableStateOf(false) }
+    val shareGate by application.taskConfigurationGate.state.collectAsStateWithLifecycle()
+    val entry by application.labyrinthEntryRecognitionSession.state.collectAsStateWithLifecycle()
+    val reset by application.gameSessionResetWorkflow.state.collectAsStateWithLifecycle()
+    val clan by application.clanBattleRecognitionSession.state.collectAsStateWithLifecycle()
+    val labyrinth by application.labyrinthController.uiState.collectAsStateWithLifecycle()
+    val batch by application.labyrinthBatchController.state.collectAsStateWithLifecycle()
+    val halt by application.labyrinthBatchController.haltReason.collectAsStateWithLifecycle()
+    val autoRun by application.labyrinthAutoRunWorkflow.progress.collectAsStateWithLifecycle()
+    val sharingReason = remember(shareGate, entry, reset, clan, labyrinth, batch, halt, autoRun) {
+        application.configurationTransferBlockedReason()
+            ?: com.landosol.toolbox.automation.TaskConfigurationGate.BUSY_MESSAGE.takeIf { shareGate.admissions > 0 || shareGate.transferring }
+    }
+    if (sharing) {
+        com.landosol.toolbox.ui.labyrinth.LabyrinthConfigShareScreen(application) { sharing = false }
+        return
+    }
     val lifecycleOwner = LocalLifecycleOwner.current
     var refreshToken by remember { mutableIntStateOf(0) }
     val notificationLauncher = rememberLauncherForActivityResult(
@@ -324,6 +344,9 @@ private fun PermissionRoute() {
     PermissionCenterScreen(
         state = state,
         onBack = null,
+        onOpenConfigurationSharing = { sharing = true },
+        configurationSharingEnabled = sharingReason == null,
+        configurationSharingReason = sharingReason,
         onOpenAccessibilitySettings = {
             context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         },

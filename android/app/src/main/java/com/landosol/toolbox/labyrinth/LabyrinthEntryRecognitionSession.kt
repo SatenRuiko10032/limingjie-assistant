@@ -1133,6 +1133,7 @@ class LabyrinthEntryRecognitionSession(
     private val debugFramePublisher: ((CapturedFrame, LabyrinthEntryRecognitionSessionState, LabyrinthEntryFrameResult, AutomationOverlayPresentation) -> Unit)? = null,
     private val clock: () -> Long = System::currentTimeMillis,
     private val strategyProvider: (() -> LabyrinthStrategySnapshot)? = null,
+    private val configurationGate: com.landosol.toolbox.automation.TaskConfigurationGate = com.landosol.toolbox.automation.TaskConfigurationGate(),
     private val rerollRequester: (suspend (Long) -> Boolean)? = null,
     /**
      * Formal run outcome for an outer batch orchestrator (labyrinth-full-automation.md §11).
@@ -1774,6 +1775,16 @@ class LabyrinthEntryRecognitionSession(
         dryRun: Boolean = true,
         accountId: Long? = null,
         runId: String? = null,
+    ): LabyrinthEntryRecognitionStartResult {
+        val admission = configurationGate.tryBeginTask()
+            ?: return LabyrinthEntryRecognitionStartResult.Blocked(com.landosol.toolbox.automation.TaskConfigurationGate.TRANSFER_MESSAGE)
+        return try { startAdmitted(dryRun, accountId, runId) } finally { admission.close() }
+    }
+
+    private suspend fun startAdmitted(
+        dryRun: Boolean,
+        accountId: Long?,
+        runId: String?,
     ): LabyrinthEntryRecognitionStartResult = mutex.withLock {
         activeSessionId?.let { return LabyrinthEntryRecognitionStartResult.AlreadyRunning(it) }
         sessionManager.current()?.let { running ->
