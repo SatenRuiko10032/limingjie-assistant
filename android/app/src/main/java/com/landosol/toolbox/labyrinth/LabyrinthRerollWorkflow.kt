@@ -88,6 +88,7 @@ data class LabyrinthRouteJson(
     val currentBlockId: Long? = null,
     val routeEvaluationMode: String = LabyrinthRouteEvaluationMode.LEGACY_TEMPLATE.name,
     val valueAllowance: Int = 0,
+    val customNodePlan: LabyrinthCustomNodePlan = LabyrinthCustomNodePlan(),
 ) {
     val blockIds: List<Long> get() = nodes.map(LabyrinthNodeJson::blockId)
 
@@ -169,6 +170,7 @@ private data class LabyrinthRoutePolicyJson(
     val area5BossIds: List<Int>,
     val routeEvaluationMode: String = LabyrinthRouteEvaluationMode.LEGACY_TEMPLATE.name,
     val valueAllowance: Int = 0,
+    val customNodePlan: LabyrinthCustomNodePlan = LabyrinthCustomNodePlan(),
 )
 
 class RoomLabyrinthRerollCheckpointStore(
@@ -230,6 +232,7 @@ private fun LabyrinthRoutePolicy.toJson() = LabyrinthRoutePolicyJson(
     area5BossIds = area5BossIds.sorted(),
     routeEvaluationMode = evaluationMode.name,
     valueAllowance = valueAllowance,
+    customNodePlan = customNodePlan,
 )
 
 private fun LabyrinthRoutePolicyJson.toDomain() = LabyrinthRoutePolicy(
@@ -243,6 +246,9 @@ private fun LabyrinthRoutePolicyJson.toDomain() = LabyrinthRoutePolicy(
         .getOrDefault(LabyrinthRouteEvaluationMode.LEGACY_TEMPLATE),
     valueAllowance = valueAllowance.coerceIn(0, LabyrinthRerollOptions.MAX_VALUE_ALLOWANCE),
     thirdBlockChoice = LabyrinthThirdBlockChoice.valueOf(thirdBlockChoice),
+    customNodePlan = customNodePlan.also { plan ->
+        plan.validationError()?.let { throw IllegalArgumentException(it) }
+    },
     area3BossIds = area3BossIds.toSet(),
     area5BossIds = area5BossIds.toSet(),
 )
@@ -295,6 +301,7 @@ class RoomLabyrinthRouteStore(
             currentBlockId = currentBlockId,
             routeEvaluationMode = config.routePolicy.evaluationMode.name,
             valueAllowance = config.routePolicy.valueAllowance,
+            customNodePlan = config.routePolicy.customNodePlan,
         )
         database.labyrinthRouteDao().insert(
             LabyrinthRouteEntity(
@@ -307,6 +314,7 @@ class RoomLabyrinthRouteStore(
                 createdAt = clock(),
             ),
         )
+        LabyrinthRoutePreviewCache.publish(routeJson)
     }
 
     override suspend fun loadLatest(accountId: Long): LabyrinthRouteJson? {
@@ -331,11 +339,16 @@ class RoomLabyrinthRouteStore(
         }.getOrNull() ?: return@withTransaction false
         if (saved.enterId != enterId) return@withTransaction false
         val advanced = saved.withAdvancedCurrentBlock(currentBlockId) ?: return@withTransaction false
-        if (advanced == saved) return@withTransaction true
-        dao.updateRouteJson(
+        if (advanced == saved) {
+            LabyrinthRoutePreviewCache.publish(saved)
+            return@withTransaction true
+        }
+        val updated = dao.updateRouteJson(
             id = entity.id,
             routeJson = Json.encodeToString(LabyrinthRouteJson.serializer(), advanced),
         ) == 1
+        if (updated) LabyrinthRoutePreviewCache.publish(advanced)
+        updated
     }
 }
 
@@ -418,6 +431,9 @@ class ExistingLabyrinthRouteResolver(
                     )
 
                     RouteSearchResult.NoRoute -> ExistingLabyrinthRouteResult.NoMatchingRoute
+                    is RouteSearchResult.Rejected -> if (search.fatal) {
+                        ExistingLabyrinthRouteResult.Failure(search.message, LabyrinthFailureKind.PROTOCOL)
+                    } else ExistingLabyrinthRouteResult.NoMatchingRoute
                 }
             }
         }
@@ -453,6 +469,11 @@ class LabyrinthRerollWorkflow(
             "尝试次数必须在 1 到 ${LabyrinthRerollOptions.MAX_ATTEMPTS} 之间"
         }
 
+        if (config.routePolicy.evaluationMode == LabyrinthRouteEvaluationMode.CUSTOM_NODES) {
+            config.routePolicy.customNodePlan.validationError()?.let {
+                return LabyrinthRerollResult.Failure(it)
+            }
+        }
         onProgress(progress(config, 0, "检查当前黎明界状态"))
         when (val top = readTopWithRetry(config, 0, "读取当前黎明界状态", onProgress)) {
             is LabyrinthOperationResult.Failure -> return LabyrinthRerollResult.Failure(top.message, top.kind)
@@ -668,12 +689,25 @@ class LabyrinthRerollWorkflow(
                 routeStore.save(config, search.route, attempt, allNodes = entered.map)
                 return LabyrinthRerollResult.Success(search.route, attempt)
             }
+            val rejection = search as? RouteSearchResult.Rejected
+            if (rejection?.fatal == true) {
+                saveCheckpoint(
+                    config = config,
+                    attempt = attempt,
+                    enterId = entered.enterId,
+                    verdict = LabyrinthRouteVerdict.PENDING_VERIFICATION,
+                    message = rejection.message,
+                )
+                return LabyrinthRerollResult.Failure(rejection.message, LabyrinthFailureKind.PROTOCOL)
+            }
+            val rejectionMessage = rejection?.message ?: "当前开局不符合目标路线"
+            if (rejection != null) onProgress(progress(config, attempt, rejectionMessage))
             saveCheckpoint(
                 config = config,
                 attempt = attempt,
                 enterId = entered.enterId,
                 verdict = LabyrinthRouteVerdict.NOT_TARGET,
-                message = "当前开局不符合目标路线",
+                message = rejectionMessage,
             )
             val retirementFailure = retireUntilGone(
                 config = config,
