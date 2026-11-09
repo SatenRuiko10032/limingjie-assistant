@@ -209,7 +209,10 @@ class LabyrinthShopPolicy(
                 )
             }
         }
-        val purchasable = items.filter { it.purchasable && it.categoryState == LabyrinthShopCategoryState.READY }
+        val purchasable = items.filter { item ->
+            item.purchasable && item.categoryState == LabyrinthShopCategoryState.READY &&
+                (item.kind == LabyrinthShopItemKind.ROLE_IMPRINT || acquired.none { it.relicId == item.relicMatch?.relicId })
+        }
         val skipRelicRarities = currentArea?.let { skipRelicRaritiesByArea[it] } ?: emptySet()
         val recognizedRelicItems = purchasable.filter {
             it.kind != LabyrinthShopItemKind.ROLE_IMPRINT && it.relicMatch?.recognized == true &&

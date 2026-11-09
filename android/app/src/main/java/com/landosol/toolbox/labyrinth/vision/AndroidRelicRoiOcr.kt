@@ -10,10 +10,10 @@ internal class AndroidRelicRoiOcr(private val submit: (Bitmap, (String?) -> Unit
     /** See [RelicOcrScheduler.lastCompletionAt]. */
     fun lastCompletionAt(): Long = scheduler.lastCompletionAt()
 
-    fun read(bitmap: Bitmap, slot: String, rect: EntryPixelRect, scale: Int = 1): RelicOcrScheduler.Read? {
+    fun read(bitmap: Bitmap, slot: String, rect: EntryPixelRect, scale: Int = 1, capturedAtMillis: Long = Long.MIN_VALUE): RelicOcrScheduler.Read? {
         val fingerprint = relicRoiFingerprint(bitmap, rect)
         val cached = scheduler.cached(slot, fingerprint)
-        val ticket = scheduler.request(slot, fingerprint) ?: return cached
+        val ticket = scheduler.request(slot, fingerprint, capturedAtMillis) ?: return cached
         var input: Bitmap? = null
         try {
             val crop = Bitmap.createBitmap(bitmap, rect.left, rect.top, rect.width, rect.height)

@@ -34,7 +34,8 @@ class AndroidLabyrinthRelicTemplateLoader(
         }
     }
 
-    private fun loadRelics(): List<RelicResource> {
+    /** Metadata can be used for fixed grants without decoding any icon bitmaps. */
+    fun loadRelics(): List<RelicResource> {
         val root = json.parseToJsonElement(readAsset(RELICS_FILE)).jsonObject
         return root["relics"]?.jsonArray.orEmpty().map { json.decodeFromJsonElement<RelicResource>(it) }
     }

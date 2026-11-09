@@ -35,6 +35,8 @@ data class LabyrinthRelicMatch(
     val currentMarkStacks: Int? = null,
     val currentMarkStacksEvidenceText: String? = null,
     val currentMarkStacksEvidenceId: Long? = null,
+    val currentMarkStacksConfirmations: Int = 0,
+    val currentMarkStacksCapturedAtMillis: Long = Long.MIN_VALUE,
 ) {
     val recognized: Boolean get() = relicId != null
 }
@@ -54,6 +56,7 @@ data class LabyrinthNodeRelicMarkStack(
     val evidenceText: String? = null,
     /** Repeated cached OCR reads share an ID and must not count as new confirmations. */
     val evidenceId: Long? = null,
+    val capturedAtMillis: Long = Long.MIN_VALUE,
 ) {
     val recognized: Boolean get() = !attribute.isNullOrBlank() && stacks != null
 }
