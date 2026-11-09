@@ -38,6 +38,8 @@ sealed interface LabyrinthShopDecision {
  *   buy from is not paid for twice by mistake;
  * - when no relic can still be bought and another relic cycle cannot be refreshed, a safely
  *   identified purchasable role imprint may consume the remaining coins and enter role selection;
+ * - a purchasable imprint whose role name is still being re-read keeps the visit open for one
+ *   bounded grace window instead of closing the shop with the good unsold;
  * - every live good passes bounded title classification before purchase; unresolved goods are
  *   skipped after three crop variants and never count as purchased relic stock.
  *
@@ -142,6 +144,22 @@ class LabyrinthShopPolicy(
             }
             .minWithOrNull(compareBy({ it.choiceRoleImprint }, { it.slotId }))
 
+        // A purchasable imprint whose role name OCR has not recovered yet proves the shelf is not
+        // empty, so the visit must not end on it. Recognition keeps a bounded grace window open
+        // for the remaining title crops; only once that window closes may the close decisions
+        // below fire.
+        // 2026-11-09: areas 5 and 3 both closed with coins left and one such imprint unsold.
+        val pendingRoleImprint = items.firstOrNull { item ->
+            item.categoryState == LabyrinthShopCategoryState.READY && item.purchasable &&
+                item.kind == LabyrinthShopItemKind.ROLE_IMPRINT &&
+                item.roleImprintLabel.isNullOrBlank() && item.imprintLabelPending
+        }
+        fun waitForPendingImprint(reason: String): LabyrinthShopDecision = pendingRoleImprint?.let {
+            LabyrinthShopDecision.Wait(
+                "${it.slotId}已确认是职能印记，职能名尚未读出，等待重新识别后再决定",
+            )
+        } ?: LabyrinthShopDecision.Close(reason)
+
         // The game exposes exactly three relic goods per stock cycle. In a continuous session the
         // counter below reaches 3 from purchase-complete commits. If the app is restarted while
         // still inside the shop, that volatile counter is lost; when all three active goods have
@@ -182,7 +200,7 @@ class LabyrinthShopPolicy(
             // During clearance the visit continues to the ladder at the end of this function
             // instead of closing here.
             if (!clearance) {
-                return LabyrinthShopDecision.Close(
+                return waitForPendingImprint(
                     if ((currentArea ?: 0) >= finalArea) {
                         "本轮前三个遗物已买完且无法刷新，也没有可购买印记，结束商店"
                     } else {
@@ -313,7 +331,7 @@ class LabyrinthShopPolicy(
             )
         }
 
-        return LabyrinthShopDecision.Close(
+        return waitForPendingImprint(
             when {
                 items.any { it.categoryState == LabyrinthShopCategoryState.EXHAUSTED } ->
                     "未确认商品已完成三轮识别并跳过；没有可确认购买项，退出商店"

@@ -55,7 +55,25 @@ data class LabyrinthConfigImportPlan(
             when (key) {
                 "eventChoiceOverrides" -> addEventChanges(old.jsonObject, new.jsonObject)
                 "openingRosters" -> addRosterChanges(old.jsonObject, new.jsonObject, roleNames)
+                "customNodePlan" -> addCustomNodeChanges(old.jsonObject, new.jsonObject)
                 else -> add("${FIELD_LABELS.getValue(key)}：${display(key, old)} → ${display(key, new)}")
+            }
+        }
+    }
+
+    private fun MutableList<String>.addCustomNodeChanges(before: JsonObject, after: JsonObject) {
+        val labels = linkedMapOf(
+            "area1Column3" to "区域1第3列", "area1Column5" to "区域1第5列",
+            "area2Columns2And6" to "区域2第2、6列", "area3Column4" to "区域3第4列",
+            "area4Column2" to "区域4第2列", "area4Column7" to "区域4第7列",
+            "thirdBlockChoice" to "区域3/5第3列",
+        )
+        labels.forEach { (key, label) ->
+            if (before[key] != after[key]) {
+                fun name(value: JsonElement): String = if (key == "thirdBlockChoice") {
+                    LabyrinthThirdBlockChoice.valueOf(value.jsonPrimitive.content).label
+                } else LabyrinthCustomNodePlan.labelOf(value.jsonPrimitive.int)
+                add("自定义 · $label：${name(before.getValue(key))} → ${name(after.getValue(key))}")
             }
         }
     }

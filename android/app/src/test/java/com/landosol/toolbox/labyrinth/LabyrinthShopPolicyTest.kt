@@ -847,6 +847,77 @@ class LabyrinthShopPolicyTest {
             decision is LabyrinthShopDecision.Close)
     }
 
+    /**
+     * 2026-11-09 bundle: area 5 shop, refill already dark, one purchasable role imprint whose title
+     * OCR only produced "职能印记" without a role name. The policy used to close the visit with
+     * coins left; it must wait on the remaining title crops instead, and only close once the
+     * recognition grace window has expired.
+     */
+    @Test fun `area 5 waits on an imprint whose role name is still being read`() {
+        val policy = LabyrinthShopPolicy()
+        fun row(pending: Boolean, label: String? = null) = listOf(
+            item("1", null, null, recognized = false, status = LabyrinthShopItemStatus.DISABLED),
+            item("2", null, null, recognized = false, kind = LabyrinthShopItemKind.ROLE_IMPRINT,
+                roleImprintLabel = label, imprintLabelPending = pending),
+            item("3", null, null, recognized = false, status = LabyrinthShopItemStatus.DISABLED),
+        )
+        fun decide(items: List<LabyrinthShopItemMatch>) = policy.decide(
+            currentArea = 5,
+            items = items,
+            acquired = emptyList(),
+            refreshAvailable = false,
+            relicPurchasesInCycle = 3,
+            refreshAvailabilityKnown = true,
+        )
+
+        val waiting = decide(row(pending = true))
+        assertTrue(waiting is LabyrinthShopDecision.Wait)
+        assertTrue((waiting as LabyrinthShopDecision.Wait).reason.contains("职能名"))
+
+        // Once recognition recovers the role name the same row is bought instead of closed.
+        val recovered = decide(row(pending = false, label = "治疗型职能印记"))
+        assertEquals("2", (recovered as LabyrinthShopDecision.BuyRoleImprint).item.slotId)
+
+        // Grace window over: the visit closes so the run can never park on an unreadable title.
+        assertTrue(decide(row(pending = false)) is LabyrinthShopDecision.Close)
+    }
+
+    /** Area 3 reports the same symptom, and it refreshes nothing, so the wait matters there too. */
+    @Test fun `area 3 waits on an unread role name before closing`() {
+        val policy = LabyrinthShopPolicy()
+        val row = listOf(
+            item("1", null, null, recognized = false, status = LabyrinthShopItemStatus.DISABLED),
+            item("2", null, null, recognized = false, kind = LabyrinthShopItemKind.ROLE_IMPRINT,
+                imprintLabelPending = true),
+            item("3", null, null, recognized = false, status = LabyrinthShopItemStatus.DISABLED),
+        )
+        val waiting = policy.decide(
+            currentArea = 3,
+            items = row,
+            acquired = emptyList(),
+            refreshAvailable = false,
+            relicPurchasesInCycle = 3,
+            refreshAvailabilityKnown = true,
+        )
+        assertTrue(waiting is LabyrinthShopDecision.Wait)
+    }
+
+    @Test fun `a nameless imprint never outranks a purchasable one`() {
+        val policy = LabyrinthShopPolicy()
+        val decision = policy.decide(
+            currentArea = 5,
+            items = listOf(
+                item("1", null, null, recognized = false, kind = LabyrinthShopItemKind.ROLE_IMPRINT,
+                    imprintLabelPending = true),
+                item("2", null, null, recognized = false, kind = LabyrinthShopItemKind.ROLE_IMPRINT,
+                    roleImprintLabel = "增益型职能印记"),
+            ),
+            acquired = emptyList(),
+            refreshAvailable = false,
+        )
+        assertEquals("2", (decision as LabyrinthShopDecision.BuyRoleImprint).item.slotId)
+    }
+
     private fun item(
         id: String,
         mark: String?,
@@ -859,6 +930,7 @@ class LabyrinthShopPolicyTest {
         rarity: Int = 0,
         choiceRoleImprint: Boolean = false,
         categoryState: LabyrinthShopCategoryState = LabyrinthShopCategoryState.READY,
+        imprintLabelPending: Boolean = false,
     ): LabyrinthShopItemMatch {
         val relic = LabyrinthRelicMatch(
             slotId = id,
@@ -888,6 +960,7 @@ class LabyrinthShopPolicyTest {
             roleImprintLabel = roleImprintLabel,
             choiceRoleImprint = choiceRoleImprint,
             categoryState = categoryState,
+            imprintLabelPending = imprintLabelPending,
         )
     }
 }

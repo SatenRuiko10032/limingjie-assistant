@@ -171,7 +171,16 @@ object LabyrinthConfigShareCodec {
             decodeValue<Map<String, Int>>(fields)
         }
         val reroll = envelope.modules["reroll"]?.let { element ->
-            val fields = requireFields(element, rerollTemplate)
+            val supplied = element as? JsonObject ?: throw IllegalArgumentException("刷开局模块结构无效")
+            val legacyKeys = rerollTemplate.keys - "customNodePlan"
+            val compatible = if (supplied.keys == legacyKeys) {
+                require(supplied["routeEvaluationMode"] != JsonPrimitive(LabyrinthRouteEvaluationMode.CUSTOM_NODES.name)) {
+                    "自定义模式缺少节点配置"
+                }
+                JsonObject(supplied + ("customNodePlan" to rerollTemplate.getValue("customNodePlan")))
+            } else supplied
+            val fields = requireFields(compatible, rerollTemplate)
+            requireFields(fields.getValue("customNodePlan"), rerollTemplate.getValue("customNodePlan") as JsonObject)
             listOf("area3BossIds", "area5BossIds").forEach { key ->
                 requireArray(fields[key]).forEach { requirePrimitive(it, false) }
             }
