@@ -239,12 +239,16 @@ class AndroidLabyrinthEntryFrameProcessor private constructor(
     private val relicStackResolver: AndroidLabyrinthRelicStackResolver,
     private val nodeRelicStackResolver: AndroidLabyrinthNodeRelicStackResolver,
     private val relicDetailResolver: AndroidLabyrinthRelicDetailResolver,
+    private val relicRewardResolver: AndroidLabyrinthRelicRewardResolver,
     private val skipJoinedCharacters: () -> Boolean,
+    private val relicEvidenceVersion: () -> Long,
+    private val relicVerificationMarks: () -> Set<String>,
 ) {
     fun process(frame: CapturedFrame): LabyrinthEntryFrameResult {
         val started = System.nanoTime()
+        val pixels = AndroidPixelImageAdapter.from(frame.bitmap)
         val result = processor.process(
-            AndroidPixelImageAdapter.from(frame.bitmap),
+            pixels,
             deferRoleRewardPortraits = true,
             skipJoinedCharacters = skipJoinedCharacters(),
         )
@@ -255,13 +259,16 @@ class AndroidLabyrinthEntryFrameProcessor private constructor(
         val shopResolved = shopItemResolver.resolve(frame.bitmap, eventResolved)
         val roleResolved = roleRewardNameResolver.resolve(frame.bitmap, shopResolved)
         val relicStarted = System.nanoTime()
-        val relicResolved = relicStackResolver.resolve(frame.bitmap, roleResolved)
+        val evidenceVersion = relicEvidenceVersion()
+        val rewardResolved = relicRewardResolver.resolve(frame.bitmap, pixels, roleResolved, frame.timestampMillis)
+        val relicResolved = relicStackResolver.resolve(frame.bitmap, rewardResolved, frame.timestampMillis, evidenceVersion)
         val nodeStarted = System.nanoTime()
-        val nodeResolved = nodeRelicStackResolver.resolve(frame.bitmap, relicResolved)
+        val nodeResolved = nodeRelicStackResolver.resolve(frame.bitmap, relicResolved, frame.timestampMillis, evidenceVersion, relicVerificationMarks())
         val detailStarted = System.nanoTime()
-        val resolved = relicDetailResolver.resolve(frame.bitmap, nodeResolved)
+        val resolved = relicDetailResolver.resolve(frame.bitmap, nodeResolved, frame.timestampMillis, evidenceVersion)
         val finished = System.nanoTime()
         return resolved.copy(
+            relicEvidenceVersion = evidenceVersion,
             elapsedMillis = (finished - started) / 1_000_000,
             stageMillis = result.stageMillis + mapOf(
                 "exEncounter" to (exResolvedAt - resolvedStarted) / 1_000_000,
@@ -280,6 +287,8 @@ class AndroidLabyrinthEntryFrameProcessor private constructor(
             characterAttributes: Map<String, LabyrinthCharacterAttribute?> = emptyMap(),
             finalBossOnly: () -> Boolean = { false },
             skipJoinedCharacters: () -> Boolean = { false },
+            relicEvidenceVersion: () -> Long = { 0 },
+            relicVerificationMarks: () -> Set<String> = { emptySet() },
             nodeSearchHint: () -> NodeSearchHint? = { null },
             nodeScanRequested: () -> Boolean = { true },
             nodeScanConsumable: () -> Boolean = { true },
@@ -349,7 +358,10 @@ class AndroidLabyrinthEntryFrameProcessor private constructor(
                 relicStackResolver = AndroidLabyrinthRelicStackResolver(),
                 nodeRelicStackResolver = AndroidLabyrinthNodeRelicStackResolver(),
                 relicDetailResolver = AndroidLabyrinthRelicDetailResolver(),
+                relicRewardResolver = AndroidLabyrinthRelicRewardResolver(LabyrinthRelicRewardRecognizer(relicTemplates)),
                 skipJoinedCharacters = skipJoinedCharacters,
+                relicEvidenceVersion = relicEvidenceVersion,
+                relicVerificationMarks = relicVerificationMarks,
             )
         }
     }

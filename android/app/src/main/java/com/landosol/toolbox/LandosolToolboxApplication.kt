@@ -269,6 +269,8 @@ class LandosolToolboxApplication : Application() {
                     characterAttributes = characterAttributes,
                     finalBossOnly = finalBossOnly,
                     skipJoinedCharacters = { labyrinthEntryRecognitionSession.skipRoleRewardJoinedRecognition },
+                    relicEvidenceVersion = { labyrinthEntryRecognitionSession.relicEvidenceVersion },
+                    relicVerificationMarks = { labyrinthEntryRecognitionSession.relicVerificationMarks },
                     nodeSearchHint = { labyrinthEntryRecognitionSession.currentNodeSearchHint() },
                     nodeScanRequested = { labyrinthEntryRecognitionSession.nodeScanRequested() },
                     nodeScanConsumable = { labyrinthEntryRecognitionSession.nodeScanConsumable() },
@@ -302,6 +304,9 @@ class LandosolToolboxApplication : Application() {
             battleTeamRecommendationUnavailableReason = roleDecisionUnavailableReason,
             battleTeamSelectionPlanner = roleDecisionRuntime?.battleTeamSelectionPlanner,
             runStateStore = labyrinthRunStateStore,
+            openingRelicCatalog = com.landosol.toolbox.labyrinth.LabyrinthOpeningRelicCatalog(
+                com.landosol.toolbox.labyrinth.vision.AndroidLabyrinthRelicTemplateLoader(this).loadRelics(),
+            ),
             routeLoader = { accountId ->
                 accountId?.let { labyrinthRouteStore.loadLatest(it) }
             },

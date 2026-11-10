@@ -8,6 +8,7 @@ import com.landosol.toolbox.protocol.labyrinth.LabyrinthApi
 import com.landosol.toolbox.protocol.labyrinth.LabyrinthEnterRequest
 import com.landosol.toolbox.protocol.labyrinth.LabyrinthFailureKind
 import com.landosol.toolbox.protocol.labyrinth.LabyrinthMapNode
+import com.landosol.toolbox.protocol.labyrinth.LabyrinthOpeningRelicState
 import com.landosol.toolbox.protocol.labyrinth.LabyrinthOperationResult
 import com.landosol.toolbox.protocol.labyrinth.LabyrinthRoute
 import com.landosol.toolbox.protocol.labyrinth.LabyrinthTop
@@ -89,12 +90,15 @@ data class LabyrinthRouteJson(
     val routeEvaluationMode: String = LabyrinthRouteEvaluationMode.LEGACY_TEMPLATE.name,
     val valueAllowance: Int = 0,
     val customNodePlan: LabyrinthCustomNodePlan = LabyrinthCustomNodePlan(),
+    /** Account evidence captured for this enterId; absent in legacy route documents. */
+    val openingRelics: LabyrinthOpeningRelicState? = null,
 ) {
     val blockIds: List<Long> get() = nodes.map(LabyrinthNodeJson::blockId)
 
     fun toLabyrinthRoute(): LabyrinthRoute = LabyrinthRoute(
         enterId = enterId,
         nodes = nodes.map { it.toLabyrinthMapNode() },
+        openingRelics = openingRelics,
     )
 
     fun toFullMap(): List<LabyrinthMapNode> = allNodes.map { it.toLabyrinthMapNode() }
@@ -123,6 +127,14 @@ interface LabyrinthRouteStore {
 
     /** Advances only the latest matching opening; implementations must reject route regression. */
     suspend fun updateCurrentBlock(accountId: Long, enterId: Long, currentBlockId: Long): Boolean = false
+}
+
+internal fun LabyrinthRouteJson.withOpeningRelicsFrom(previous: LabyrinthRouteJson?): LabyrinthRouteJson {
+    val old = previous?.takeIf { it.enterId == enterId && it.guildId == guildId }
+        ?.openingRelics?.takeIf { it.guildId == guildId }
+    val incoming = openingRelics?.takeIf { it.guildId == guildId }
+    val retained = incoming?.copy(enhanceNodeIds = incoming.enhanceNodeIds ?: old?.enhanceNodeIds) ?: old
+    return copy(openingRelics = retained)
 }
 
 internal fun LabyrinthRouteJson.withAdvancedCurrentBlock(currentBlockId: Long): LabyrinthRouteJson? {
@@ -302,19 +314,24 @@ class RoomLabyrinthRouteStore(
             routeEvaluationMode = config.routePolicy.evaluationMode.name,
             valueAllowance = config.routePolicy.valueAllowance,
             customNodePlan = config.routePolicy.customNodePlan,
+            openingRelics = route.openingRelics,
         )
-        database.labyrinthRouteDao().insert(
-            LabyrinthRouteEntity(
-                accountId = config.accountId,
-                runId = null,
-                enterId = route.enterId,
-                difficulty = config.difficulty,
-                attemptCount = attempt,
-                routeJson = Json.encodeToString(LabyrinthRouteJson.serializer(), routeJson),
-                createdAt = clock(),
-            ),
-        )
-        LabyrinthRoutePreviewCache.publish(routeJson)
+        val saved = database.withTransaction {
+            val merged = routeJson.withOpeningRelicsFrom(loadLatest(config.accountId))
+            database.labyrinthRouteDao().insert(
+                LabyrinthRouteEntity(
+                    accountId = config.accountId,
+                    runId = null,
+                    enterId = route.enterId,
+                    difficulty = config.difficulty,
+                    attemptCount = attempt,
+                    routeJson = Json.encodeToString(LabyrinthRouteJson.serializer(), merged),
+                    createdAt = clock(),
+                ),
+            )
+            merged
+        }
+        LabyrinthRoutePreviewCache.publish(saved)
     }
 
     override suspend fun loadLatest(accountId: Long): LabyrinthRouteJson? {
@@ -325,6 +342,22 @@ class RoomLabyrinthRouteStore(
             null
         }
     }
+
+    /** Refresh only the unadvanced opening whose identity was just verified by top and resume. */
+    suspend fun updateOpeningRelics(accountId: Long, enterId: Long, state: LabyrinthOpeningRelicState): Boolean =
+        database.withTransaction {
+            val dao = database.labyrinthRouteDao()
+            val entity = dao.getLatestByAccount(accountId) ?: return@withTransaction false
+            if (entity.enterId != enterId) return@withTransaction false
+            val saved = runCatching {
+                Json.decodeFromString(LabyrinthRouteJson.serializer(), entity.routeJson)
+            }.getOrNull() ?: return@withTransaction false
+            if (saved.enterId != enterId || saved.guildId != state.guildId || saved.currentBlockId != null) return@withTransaction false
+            val refreshed = saved.copy(openingRelics = state).withOpeningRelicsFrom(saved)
+            val updated = dao.updateRouteJson(entity.id, Json.encodeToString(LabyrinthRouteJson.serializer(), refreshed)) == 1
+            if (updated) LabyrinthRoutePreviewCache.publish(refreshed)
+            updated
+        }
 
     override suspend fun updateCurrentBlock(
         accountId: Long,
@@ -422,7 +455,9 @@ class ExistingLabyrinthRouteResolver(
                 ) {
                     is RouteSearchResult.Found -> ExistingLabyrinthRouteResult.Found(
                         ResolvedLabyrinthRoute(
-                            route = search.route,
+                            route = search.route.copy(openingRelics = (value.guildId ?: top.guildId)?.let { guildId ->
+                                LabyrinthOpeningRelicState(guildId, top.enhanceNodeIds)
+                            }),
                             allNodes = value.map,
                             currentBlockId = value.currentBlockId,
                             guildId = value.guildId ?: top.guildId,
@@ -474,10 +509,12 @@ class LabyrinthRerollWorkflow(
                 return LabyrinthRerollResult.Failure(it)
             }
         }
+        var openingRelicState: LabyrinthOpeningRelicState? = null
         onProgress(progress(config, 0, "检查当前黎明界状态"))
         when (val top = readTopWithRetry(config, 0, "读取当前黎明界状态", onProgress)) {
             is LabyrinthOperationResult.Failure -> return LabyrinthRerollResult.Failure(top.message, top.kind)
             is LabyrinthOperationResult.Success -> {
+                openingRelicState = LabyrinthOpeningRelicState(config.guildId, top.value.enhanceNodeIds)
                 val existing = top.value.enterId
                 if (existing != null && config.abandonExisting) {
                     onProgress(progress(config, 0, "放弃现有开局（不复用）"))
@@ -686,8 +723,9 @@ class LabyrinthRerollWorkflow(
                     verdict = LabyrinthRouteVerdict.TARGET,
                     message = "当前开局符合目标路线",
                 )
-                routeStore.save(config, search.route, attempt, allNodes = entered.map)
-                return LabyrinthRerollResult.Success(search.route, attempt)
+                val grantedRoute = search.route.copy(openingRelics = openingRelicState)
+                routeStore.save(config, grantedRoute, attempt, allNodes = entered.map)
+                return LabyrinthRerollResult.Success(grantedRoute, attempt)
             }
             val rejection = search as? RouteSearchResult.Rejected
             if (rejection?.fatal == true) {

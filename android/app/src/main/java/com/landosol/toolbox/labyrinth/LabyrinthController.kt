@@ -174,6 +174,7 @@ internal fun labyrinthReusableOpeningSnapshotCheck(
         resume.currentBlockId != null -> "当前挑战已经推进，无法恢复已获得角色和遗物"
         resume.map.isEmpty() -> "服务端未返回完整地图"
         route == null || route.enterId != opening.enterId -> "本机没有该开局的已保存路线"
+        route.guildId != opening.guildId -> "本机路线与服务端公会不一致"
         route.blockIds.isEmpty() || !resume.map.mapTo(hashSetOf()) { it.blockId }.containsAll(route.blockIds) ->
             "服务端地图与本机保存路线不一致"
         else -> null
@@ -610,8 +611,17 @@ class LabyrinthController(
             is LabyrinthOperationResult.Failure ->
                 return com.landosol.toolbox.labyrinth.batch.LabyrinthBatchReusableOpeningCheck.Failure(result.message)
         }
-        val route = RoomLabyrinthRouteStore(database).loadLatest(accountId)
-        return labyrinthReusableOpeningSnapshotCheck(opening, top, resume, route)
+        val store = RoomLabyrinthRouteStore(database)
+        val route = store.loadLatest(accountId)
+        val checked = labyrinthReusableOpeningSnapshotCheck(opening, top, resume, route)
+        if (checked == com.landosol.toolbox.labyrinth.batch.LabyrinthBatchReusableOpeningCheck.Valid) {
+            val saved = store.updateOpeningRelics(accountId, enterId,
+                com.landosol.toolbox.protocol.labyrinth.LabyrinthOpeningRelicState(opening.guildId, top.enhanceNodeIds))
+            if (!saved) return com.landosol.toolbox.labyrinth.batch.LabyrinthBatchReusableOpeningCheck.Failure(
+                "开局信息已变化，未能保存初始遗物条件",
+            )
+        }
+        return checked
     }
 
     /** Only the foreground service may consume this explicitly authorized snapshot. */
