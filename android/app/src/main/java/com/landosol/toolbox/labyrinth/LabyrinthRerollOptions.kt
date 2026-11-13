@@ -38,6 +38,12 @@ object LabyrinthRerollOptions {
         LabyrinthGuildOption(3, "咲恋救济院"),
         LabyrinthGuildOption(4, "王宫骑士团（NIGHTMARE）"),
         LabyrinthGuildOption(5, "拉比林斯"),
+        // 新增公会：guild_id 先按 6-10 占位，待游戏数据确认后只需改这里的数字。
+        LabyrinthGuildOption(6, "慈乐之音"),
+        LabyrinthGuildOption(7, "恶魔伪王国军"),
+        LabyrinthGuildOption(8, "伊丽莎白牧场"),
+        LabyrinthGuildOption(9, "墨丘利财团"),
+        LabyrinthGuildOption(10, "暮光流星群"),
     )
 
     val area3Bosses = listOf(
