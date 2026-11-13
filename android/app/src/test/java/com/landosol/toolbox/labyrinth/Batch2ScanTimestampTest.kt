@@ -33,7 +33,7 @@ class Batch2ScanTimestampTest {
             assertEquals("RELIC_MAP_VERIFICATION", f.get("lastNodeScanHoldReason"))
             f.set("nodeScanFrameTimestampMillis", null)
             f.feed(mapFrame(), 8_999L, processingAt = 9_500L)
-            assertEquals("遗物已获得，正在复核地图系列层数", f.session.state.value.message)
+            assertEquals("正在复核地图系列层数", f.session.state.value.message)
             assertEquals(0, f.calls.get())
             assertFalse(f.session.nodeScanConsumableAt(8_999L))
         } finally { f.set("nodeScanFrameTimestampMillis", null); f.awaitActions(); f.close() }

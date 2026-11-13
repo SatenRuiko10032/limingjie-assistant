@@ -61,14 +61,43 @@ class LabyrinthRelicRewardRecognitionTest {
     }
 
     @Test fun `selection imprint is a textual negative class not a particular guild or position`() {
-        assertTrue(LabyrinthRelicRewardText.imprint("【咲恋救济院】的选择印记×1"))
-        assertTrue(LabyrinthRelicRewardText.imprint("随机 印记"))
-        assertFalse(LabyrinthRelicRewardText.imprint("咲恋救济院誓约"))
-        assertFalse(LabyrinthRelicRewardText.imprint(null))
+        assertTrue(LabyrinthRelicRewardText.nonRelic("【咲恋救济院】的选择印记×1"))
+        assertTrue(LabyrinthRelicRewardText.nonRelic("随机 印记"))
+        assertFalse(LabyrinthRelicRewardText.nonRelic("咲恋救济院誓约"))
+        assertFalse(LabyrinthRelicRewardText.nonRelic(null))
         assertTrue(LabyrinthRelicRewardText.ordinaryTitle("获得道具"))
         assertFalse(LabyrinthRelicRewardText.ordinaryTitle(null))
         assertTrue(LabyrinthRelicRewardText.seriesTitle("系列 效果一览"))
         assertFalse(LabyrinthRelicRewardText.seriesTitle("迷宫遗物效果"))
+    }
+
+    @Test fun `alpha coin rewards are a non-relic class independent of amount`() {
+        for (text in listOf("阿尔法金币×3000", "阿尔法 金币 × 3000", "阿尔法金币x3000",
+            "阿尔法金币X3000", "阿尔法金币3000", "阿尔法金币×200", "阿尔法金币")) {
+            assertTrue(text, LabyrinthRelicRewardText.nonRelic(text))
+        }
+    }
+
+    @Test fun `coin-like names and unknown rewards are not excluded as currency`() {
+        for (text in listOf("阿尔法金币袋", "阿尔法金币的加护", "阿尔法金币×未知", "金币×3000",
+            "未知奖励×3000", "3000", "高贵紫藤庐", "")) {
+            assertFalse(text, LabyrinthRelicRewardText.nonRelic(text))
+        }
+    }
+
+    @Test fun `reward popup reason is neutral about content and completion`() {
+        val resolver = AndroidLabyrinthRelicRewardResolver(recognizer, submitTextRead = { _, _ -> })
+        val hold = resolver.javaClass.getDeclaredMethod("hold", LabyrinthEntryFrameResult::class.java,
+            LabyrinthRelicRewardObservation::class.java).apply { isAccessible = true }
+        val pending = hold.invoke(resolver, result(), LabyrinthRelicRewardObservation()) as LabyrinthEntryFrameResult
+        assertEquals("正在确认奖励标题", pending.observation.reason)
+        for (complete in listOf(false, true)) {
+            val receipt = LabyrinthRelicRewardObservation(kind = LabyrinthRelicRewardKind.RELIC_EFFECT,
+                titleConfirmed = true, layoutComplete = complete, rowSlots = setOf("reward_6"))
+            val resolved = hold.invoke(resolver, result(), receipt) as LabyrinthEntryFrameResult
+            assertEquals(LabyrinthEntryPageState.ITEM_REWARD, resolved.observation.state)
+            assertEquals("奖励结果弹窗", resolved.observation.reason)
+        }
     }
 
     @Test fun `white panel without reward anchors does not become a receipt`() {

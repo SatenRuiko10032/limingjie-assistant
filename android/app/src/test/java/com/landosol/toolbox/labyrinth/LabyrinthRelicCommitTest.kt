@@ -227,16 +227,58 @@ class LabyrinthRelicCommitTest {
         } finally { harness.close() }
     }
 
+    @Test fun `Mercurius coin-only opening receipt closes without adding relics`() = runBlocking {
+        val harness = Harness(route = openingRelicRoute(guildId = 9))
+        try {
+            harness.start()
+            harness.frame(LabyrinthEntryPageState.INITIAL_CHARACTER_SELECTION, 1_500)
+            harness.frame(LabyrinthEntryPageState.CHARACTER_JOINED, 1_600)
+            val saved = harness.store.snapshot
+            assertEquals(listOf("40009", "50009"), saved.observedRelics.map { it.relicId })
+            val critical = LabyrinthRelicMark.CRITICAL
+            assertEquals(setOf(critical), harness.ledger.verificationMarks)
+            harness.ledger.observe(critical, 2, LabyrinthRelicStackSource.MAP, "map", 1, 1_700)
+            harness.ledger.observe(critical, 2, LabyrinthRelicStackSource.MAP, "map", 2, 1_800)
+            assertFalse(harness.ledger.peekWaitingForMap(1_800))
+            val evidenceVersion = harness.get("relicEvidenceVersion")
+            val slots = setOf("reward_6")
+            val kind = LabyrinthRelicRewardKind.RELIC_EFFECT
+            assertTrue(harness.reward(kind, emptyList(), 2_000, complete = false, slots = slots))
+            assertEquals("正在确认奖励内容，暂不关闭弹窗", harness.session.state.value.message)
+            assertTrue(harness.reward(kind, emptyList(), 2_100, confirmed = false, slots = slots))
+            assertEquals("正在确认奖励内容，暂不关闭弹窗", harness.session.state.value.message)
+            assertTrue(harness.reward(kind, emptyList(), 2_200, slots = slots))
+            assertFalse(harness.reward(kind, emptyList(), 2_300, slots = slots))
+            val planner = LabyrinthEntryActionPlanner()
+            assertTrue(planner.decide(LabyrinthEntryPageState.ITEM_REWARD, 1_280, 720, 2_300) is LabyrinthEntryActionDecision.Wait)
+            assertFalse(harness.reward(kind, emptyList(), 2_400, slots = slots))
+            val close = planner.decide(LabyrinthEntryPageState.ITEM_REWARD, 1_280, 720, 2_400)
+            assertEquals(LabyrinthEntryActionKind.CLOSE_ITEM_REWARD, (close as LabyrinthEntryActionDecision.Execute).kind)
+            assertEquals(saved.startedAt, harness.store.snapshot.startedAt)
+            assertEquals(saved.observedRelics, harness.store.snapshot.observedRelics)
+            assertEquals(saved.relicStacks, harness.store.snapshot.relicStacks)
+            assertEquals(saved.relicStacks, harness.ledger.records)
+            assertEquals(evidenceVersion, harness.get("relicEvidenceVersion"))
+            assertTrue(harness.ledger.verificationMarks.isEmpty())
+            assertFalse(harness.ledger.peekWaitingForMap(2_400))
+        } finally { harness.close() }
+    }
+
     @Test fun `fixed guild grants are recorded only at the initial character selection`() = runBlocking {
-        for (guild in 1..5) for (unlocked in listOf(false, true)) {
+        val newGuildMarks = mapOf(
+            6 to LabyrinthRelicMark.ENHANCEMENT, 7 to LabyrinthRelicMark.ACCELERATION,
+            8 to LabyrinthRelicMark.DEFENSE, 9 to LabyrinthRelicMark.CRITICAL,
+            10 to LabyrinthRelicMark.DEBUFF,
+        )
+        for (guild in 1..10) for (unlocked in listOf(false, true)) {
             val harness = Harness(route = openingRelicRoute(guild, if (unlocked) setOf(31) else emptySet()))
             try {
                 harness.start()
                 harness.frame(LabyrinthEntryPageState.DAWN_REALM_HOME_ACTIVE, 1_500)
                 assertTrue(harness.store.snapshot.observedRelics.isEmpty())
                 harness.frame(LabyrinthEntryPageState.INITIAL_CHARACTER_SELECTION, 2_000)
-                val ids = listOfNotNull("4000$guild", "5000$guild".takeIf { unlocked })
-                assertEquals(ids, harness.store.snapshot.observedRelics.map { it.relicId })
+                val ids = listOfNotNull((40_000 + guild).toString(), (50_000 + guild).toString().takeIf { unlocked })
+                assertEquals("guild $guild", ids, harness.store.snapshot.observedRelics.map { it.relicId })
                 val startedAt = harness.store.snapshot.startedAt
                 harness.frame(LabyrinthEntryPageState.INITIAL_CHARACTER_SELECTION, 2_100)
                 harness.frame(LabyrinthEntryPageState.CHARACTER_JOINED, 2_200)
@@ -244,7 +286,11 @@ class LabyrinthRelicCommitTest {
                 assertEquals(startedAt, harness.store.snapshot.startedAt)
                 assertEquals(ids, harness.store.snapshot.observedRelics.map { it.relicId })
                 assertEquals(ids.size, harness.ledger.stacks.values.sum())
+                newGuildMarks[guild]?.let { expectedMark ->
+                    assertEquals("guild $guild", mapOf(expectedMark to ids.size), harness.ledger.stacks)
+                }
                 assertTrue(harness.get("openingRelicBaselineKnown") as Boolean)
+                assertEquals(LabyrinthOpeningRelicReceipt(42, true), harness.store.snapshot.openingRelicReceipt)
                 assertEquals(harness.ledger.records, harness.store.snapshot.relicStacks)
             } finally { harness.close() }
         }
