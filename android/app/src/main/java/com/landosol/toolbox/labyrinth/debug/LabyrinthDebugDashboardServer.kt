@@ -754,7 +754,7 @@ class LabyrinthDebugDashboardServer(
         const val FRAME_ARCHIVE_JPEG_QUALITY = 60
         const val SOCKET_TIMEOUT_MILLIS = 3_000
         const val MAX_HEADER_LINE_BYTES = 8_192
-        const val MAX_STATE_HISTORY_ENTRIES = 600
+        const val MAX_STATE_HISTORY_ENTRIES = 5000
         const val LOGCAT_LINE_LIMIT = 2_000
         const val MAX_LOGCAT_BYTES = 2 * 1024 * 1024
 
