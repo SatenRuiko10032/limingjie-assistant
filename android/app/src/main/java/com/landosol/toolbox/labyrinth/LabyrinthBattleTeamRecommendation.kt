@@ -58,8 +58,10 @@ data class LabyrinthBattleTeamRecommendation(
         append(defenseMarkStacks)
         append(" | 目标数=")
         append(if (targetCount >= 3) "3+" else targetCount)
-        append(" | Boss安全队数=")
+        append(" | Boss计划队数=")
         append(plannedBossTeamCount)
+        append(" | Boss安全队数=")
+        append(safeBossTeamCount)
         if (excludedIncompleteCharacterIds.isNotEmpty()) {
             append(" | 严格资料排除=")
             append(excludedIncompleteCharacterIds.joinToString())

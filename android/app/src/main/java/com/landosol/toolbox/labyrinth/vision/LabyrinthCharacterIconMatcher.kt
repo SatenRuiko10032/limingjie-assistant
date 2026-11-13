@@ -2,21 +2,15 @@ package com.landosol.toolbox.labyrinth.vision
 
 import com.landosol.toolbox.clanbattle.recognition.PixelImage
 import com.landosol.toolbox.labyrinth.LabyrinthCharacterAttribute
+import com.landosol.toolbox.labyrinth.concurrent.LabyrinthFourThreadRuntime
 import java.util.IdentityHashMap
 import java.util.concurrent.Callable
 import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
-/**
- * Worker threads for the two scoring passes.
- *
- * Deliberately not the CPU count. The game shares the same virtual machine, and the formation
- * search in this project already measured 4 threads at 0.58x wall clock while 8 threads made the
- * whole run slower, so 4 is the measured sweet spot for this kind of per-frame number crunching.
- */
-private const val ICON_SCORING_THREADS = 4
+/** Default shard budget. Role and icon CPU work share exactly two workers in batch5. */
+private const val ICON_SCORING_THREADS = 2
 
 /** Below this many candidates the thread hand-off costs more than the scoring it saves. */
 private const val ICON_SCORING_MIN_CANDIDATES = 128
@@ -24,11 +18,8 @@ private const val ICON_SCORING_MIN_CANDIDATES = 128
 /** No shard should carry fewer than this, otherwise the per-shard fixed cost dominates. */
 private const val ICON_SCORING_MIN_PER_SHARD = 64
 
-/** One process-wide pool: a run calls [LabyrinthCharacterIconMatcher.match] tens of thousands of times. */
-private val ICON_SCORING_EXECUTOR: ExecutorService =
-    Executors.newFixedThreadPool(ICON_SCORING_THREADS) { runnable ->
-        Thread(runnable, "labyrinth-icon-score").apply { isDaemon = true }
-    }
+/** Alias, not a second pool. All scoring shards inherit their CPU parent's cancellation. */
+private val ICON_SCORING_EXECUTOR: ExecutorService = LabyrinthFourThreadRuntime.computeExecutor
 
 /** Shared safety floor for every page that identifies a character from the full icon pack. */
 const val LABYRINTH_CHARACTER_ICON_SAFE_CONFIDENCE = 0.35
@@ -160,6 +151,7 @@ class LabyrinthCharacterIconMatcher(
         requiredAttribute: LabyrinthCharacterAttribute? = null,
         rosterCharacterIds: Set<String>? = null,
     ): LabyrinthCharacterIconMatch {
+        LabyrinthFourThreadRuntime.cooperate()
         val candidateTemplates = if (requiredAttribute == null) {
             templates
         } else {
@@ -378,6 +370,7 @@ class LabyrinthCharacterIconMatcher(
 
     /** The pack-icon side of the scoring grid: constant for the life of the template. */
     private fun templateSamplesOf(template: LabyrinthBattleCharacterTemplate): GridSamples {
+        LabyrinthFourThreadRuntime.cooperate()
         templateSamples[template]?.let { return it }
         val image = template.image
         val bounds = EntryPixelRect(0, ICON_CROP_TOP, image.width, ICON_CROP_HEIGHT)
@@ -404,6 +397,7 @@ class LabyrinthCharacterIconMatcher(
 
     /** The pack-icon side of the coarse grid: colour only, constant for the life of the template. */
     private fun coarseSamplesOf(template: LabyrinthBattleCharacterTemplate): CoarseSamples {
+        LabyrinthFourThreadRuntime.cooperate()
         coarseTemplateSamples[template]?.let { return it }
         val image = template.image
         val samples = CoarseSamples()
@@ -588,7 +582,10 @@ class LabyrinthCharacterIconMatcher(
             minOf(ICON_SCORING_THREADS, size / ICON_SCORING_MIN_PER_SHARD).coerceAtLeast(1)
         }
         if (shards <= 1) {
-            for (index in 0 until size) scores[index] = score(index)
+            for (index in 0 until size) {
+                if ((index and 15) == 0) LabyrinthFourThreadRuntime.cooperate()
+                scores[index] = score(index)
+            }
             return scores
         }
         val perShard = (size + shards - 1) / shards
@@ -597,7 +594,10 @@ class LabyrinthCharacterIconMatcher(
             val to = minOf(size, from + perShard)
             Callable<DoubleArray> {
                 val part = DoubleArray(to - from)
-                for (index in from until to) part[index - from] = score(index)
+                for (index in from until to) {
+                    if ((index and 15) == 0) LabyrinthFourThreadRuntime.cooperate()
+                    part[index - from] = score(index)
+                }
                 part
             }
         }

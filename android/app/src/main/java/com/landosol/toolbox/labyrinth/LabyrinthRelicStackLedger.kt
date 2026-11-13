@@ -148,6 +148,10 @@ internal class LabyrinthRelicStackLedger {
         return true
     }
 
+    /** Pure query for the pre-vision scan gate. It must not start or extend the 8s window. */
+    fun peekWaitingForMap(nowMillis: Long): Boolean =
+        verifying.values.any { it == null || nowMillis - it < MAP_VERIFY_TIMEOUT_MILLIS }
+
     /** Start the bounded reread window when the map becomes visible. */
     fun waitingForMap(nowMillis: Long): Boolean {
         verifying.keys.toList().forEach { mark -> if (verifying[mark] == null) verifying[mark] = nowMillis }
