@@ -2860,7 +2860,7 @@ class LabyrinthEntryRecognitionSession(
                 lastRelicMapRereadAt = timestampMillis
                 relicMapRereads++
             }
-            _state.value = _state.value.copy(message = "遗物已获得，正在复核地图系列层数")
+            _state.value = _state.value.copy(message = "正在复核地图系列层数")
             overlayCoordinator.update(sessionId, buildOverlayPresentation(sessionId))
             return
         }
@@ -3393,10 +3393,10 @@ class LabyrinthEntryRecognitionSession(
         if (relicRewardHoldSince == Long.MIN_VALUE) relicRewardHoldSince = atMillis
         val recordedIds = _state.value.observedRelics.map { it.relicId }.toSet()
         if (relicRewardReady(reward) && reward.relics.all { it.relicId in recordedIds }) return false
-        _state.value = _state.value.copy(message = "正在识别并记录奖励遗物，暂不关闭弹窗")
+        _state.value = _state.value.copy(message = "正在确认奖励内容，暂不关闭弹窗")
         overlayCoordinator.update(sessionId, buildOverlayPresentation(sessionId))
         if (atMillis - relicRewardHoldSince >= 8_000L && !_state.value.dryRun) {
-            requestStopAfterFailure(sessionId, "奖励遗物未能完整确认，保留弹窗供核对")
+            requestStopAfterFailure(sessionId, "奖励内容未能完整确认，保留弹窗供核对")
         }
         return true
     }
