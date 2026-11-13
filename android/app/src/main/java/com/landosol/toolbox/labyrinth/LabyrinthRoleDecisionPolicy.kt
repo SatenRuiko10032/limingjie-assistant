@@ -2066,8 +2066,15 @@ class LabyrinthTeamPlanSearcher(
             //
             // Deliberately narrow: a pool that *does* hold a qualified vanguard but still cannot
             // form a team has a different problem (unknown 站位, too few roles), and its specific
-            // reason below is what tells the user which. Only a genuinely tankless pool falls back.
-            ?: return if (hasAnyEligibleVanguard(roster, context)) {
+            // reason below is what tells the user which. But a pool that cannot even fill one team
+            // has no alternative line-up at all: the frontmost role is fixed by position data and
+            // cannot be swapped, so the gate can never be satisfied and the run would idle on this
+            // page until the stall watchdog ends it. Those two cases fall back; only a pool large
+            // enough to have chosen a different front keeps the refusal and its diagnosis.
+            ?: return if (
+                roster.distinctBy(LabyrinthRoleProfile::characterId).size > TEAM_SIZE &&
+                hasAnyEligibleVanguard(roster, context)
+            ) {
                 LabyrinthTeamPlan(
                     LabyrinthTeamPlanKind.INSUFFICIENT_ROLES,
                     emptyList(),

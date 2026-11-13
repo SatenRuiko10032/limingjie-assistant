@@ -212,9 +212,9 @@ object LabyrinthOpeningRosterCatalog {
         LabyrinthOpeningRosterConfig(
             guildId = 8, guildName = "伊丽莎白牧场",
             slots = listOf(
-                slot(character("1038", "栞")),
+                slot(character("1033", "真阳")),
                 slot(character("1026", "铃")),
-                slot(character("1128", "真阳(游骑兵)")),
+                slot(character("1038", "栞")),
             ),
         ),
         LabyrinthOpeningRosterConfig(
