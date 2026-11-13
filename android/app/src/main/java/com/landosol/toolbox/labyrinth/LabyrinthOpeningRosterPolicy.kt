@@ -5,8 +5,7 @@ data class LabyrinthOpeningRosterSlot(
     val candidates: List<LabyrinthOpeningCharacter>,
 ) {
     init {
-        // 新增公会可能暂时没有开局资料：允许空槽位，由界面提示“尚未选择角色”，
-        // 规划器会把空槽视为未满足而停下，不会随机补位。
+        // 空槽位不会随机补位，规划器会将其视为未满足。
         require(candidates.map(LabyrinthOpeningCharacter::characterId).distinct().size == candidates.size)
     }
 }
@@ -194,13 +193,11 @@ object LabyrinthOpeningRosterCatalog {
             ),
             grantedCharacters = listOf(character("1068", "菈比莉斯塔")),
         ),
-        // 新增公会（guild_id 暂按 6-10 占位）：开局角色资料未定，先留三个空槽，
-        // 界面可自行添加候选；未配置时规划器会停下并提示，不会随机选人。
         LabyrinthOpeningRosterConfig(
             guildId = 6, guildName = "慈乐之音",
             slots = listOf(
-                slot(character("1348", "纺希(吉欧·格黑纳)")),
-                slot(character("1344", "千歌(祭服)")),
+                slot(character("1348", "纺希（吉奥·矶汉拿）")),
+                slot(character("1344", "千歌（礼服）")),
                 slot(character("1054", "纺希"), character("1116", "望(圣诞节)")),
             ),
         ),
@@ -277,8 +274,7 @@ object LabyrinthOpeningRosterCatalog {
                 },
             )
         } ?: base
-        // 新公会可能还没有任何开局角色资料：全部槽位为空时视为“未配置”，
-        // 让调用方走安全的等待分支，而不是反复滚动寻找不存在的候选。
+        // 全部槽位为空时返回未配置状态，由调用方安全等待。
         return resolved.takeUnless { config -> config.slots.all { it.candidates.isEmpty() } }
     }
 

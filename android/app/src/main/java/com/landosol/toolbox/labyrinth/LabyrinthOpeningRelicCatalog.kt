@@ -36,6 +36,11 @@ class LabyrinthOpeningRelicCatalog(relics: List<RelicResource>) {
             3 to ("40003" to "50003"),
             4 to ("40004" to "50004"),
             5 to ("40005" to "50005"),
+            6 to ("40006" to "50006"),
+            7 to ("40007" to "50007"),
+            8 to ("40008" to "50008"),
+            9 to ("40009" to "50009"),
+            10 to ("40010" to "50010"),
         )
     }
 }
