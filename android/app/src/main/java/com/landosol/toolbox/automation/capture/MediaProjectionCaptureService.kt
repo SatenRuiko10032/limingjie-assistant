@@ -324,6 +324,7 @@ class MediaProjectionCaptureService : Service() {
         var conversionMillis: Long? = null
         val now = System.currentTimeMillis()
         var bitmap: Bitmap? = null
+        var argbPixels: IntArray? = null
         var conversionError: Throwable? = null
         // Orientation is judged only for frames the interval would convert, so a rotated display
         // costs one metrics read per FRAME_INTERVAL_MILLIS rather than one per mirrored frame.
@@ -355,7 +356,21 @@ class MediaProjectionCaptureService : Service() {
                 lastFrameAt = now
                 try {
                     val conversionStarted = System.nanoTime()
-                    bitmap = imageToBitmap(image)
+                    val converted = imageToBitmap(image)
+                    try {
+                        if (CaptureFrameBus.currentWantsArgbSnapshot()) {
+                            // getPixels matches the legacy adapter, including Android's alpha /
+                            // premultiplication round trip. Never publish reusable RGBA scratch.
+                            val snapshot = IntArray(converted.width * converted.height)
+                            converted.getPixels(snapshot, 0, converted.width, 0, 0,
+                                converted.width, converted.height)
+                            argbPixels = snapshot
+                        }
+                        bitmap = converted
+                    } catch (error: Throwable) {
+                        converted.recycle()
+                        throw error
+                    }
                     conversionMillis = (System.nanoTime() - conversionStarted) / 1_000_000
                 } catch (error: Throwable) {
                     CaptureTelemetry.conversionError()
@@ -370,7 +385,8 @@ class MediaProjectionCaptureService : Service() {
             CaptureFrameBus.dispatch(CapturedFrame(it, now,
                 frameSequence = CaptureTelemetry.converted(),
                 captureConvertMillis = conversionMillis,
-                capturedAtElapsedRealtimeMillis = capturedAtElapsed))
+                capturedAtElapsedRealtimeMillis = capturedAtElapsed,
+                argbPixels = argbPixels))
         }
         conversionError?.let { error ->
             stopCapture("读取屏幕帧失败：${error.message ?: "未知错误"}")

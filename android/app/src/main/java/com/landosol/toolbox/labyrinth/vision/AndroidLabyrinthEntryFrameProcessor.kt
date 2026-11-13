@@ -246,7 +246,7 @@ class AndroidLabyrinthEntryFrameProcessor private constructor(
 ) {
     fun process(frame: CapturedFrame): LabyrinthEntryFrameResult {
         val started = System.nanoTime()
-        val pixels = AndroidPixelImageAdapter.from(frame.bitmap)
+        val pixels = capturedFramePixelImage(frame)
         val result = processor.process(
             pixels,
             deferRoleRewardPortraits = true,

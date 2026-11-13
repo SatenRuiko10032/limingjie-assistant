@@ -491,8 +491,8 @@ class LabyrinthEntryFrameProcessor(
         // of a million points per frame. The maps must not outlive this call: a frame that fails
         // half-way would otherwise pin ~6 MB of a dead frame, and every later score() guards on
         // frame identity anyway.
-        matcher.prepareFrame(frame)
         try {
+            matcher.prepareFrame(frame)
             return processPrepared(frame, deferRoleRewardPortraits, skipJoinedCharacters)
         } finally {
             matcher.clearPreparedFrame()
@@ -530,38 +530,7 @@ class LabyrinthEntryFrameProcessor(
         var nodeViewportSignature = ""
         var nodeViewportPixels: com.landosol.toolbox.labyrinth.node.NodeViewportPixels? = null
         val elapsedNanos = measureNanoTime {
-            val preScaled = preScaledTemplates
-                ?.takeIf { it.frameWidth == frame.width && it.frameHeight == frame.height }
-            val measurements = DEFINITIONS_BY_ID.mapValues { (id, definitions) ->
-                val template = templates.values[id]
-                    ?: return@mapValues null
-                definitions.mapNotNull { definition ->
-                    val mapped = when (definition.mapping) {
-                        EntryReferenceMapping.COVER -> ReferenceCoverMapper.map(
-                            frameWidth = frame.width,
-                            frameHeight = frame.height,
-                            referenceSize = definition.referenceSize,
-                            referenceRect = definition.referenceRect,
-                        )
-                        EntryReferenceMapping.FIT -> ReferenceFitMapper.map(
-                            frameWidth = frame.width,
-                            frameHeight = frame.height,
-                            referenceSize = definition.referenceSize,
-                            referenceRect = definition.referenceRect,
-                        )
-                    }
-                    mapped?.let { rect ->
-                        EntryAnchorMatch(
-                            score = matcher.score(
-                                frame,
-                                rect,
-                                preScaled?.templates?.get(definition) ?: template,
-                            ),
-                            rect = rect,
-                        )
-                    }
-                }.maxByOrNull(EntryAnchorMatch::score)
-            }
+            val measurements = measureLabyrinthEntryAnchors(frame, templates, matcher, preScaledTemplates)
             val scores = measurements.mapValues { (_, measurement) -> measurement?.score ?: 0.0 }
             anchorMatches = measurements.mapNotNull { (id, measurement) ->
                 measurement?.let { id to it }
@@ -964,6 +933,50 @@ class LabyrinthEntryFrameProcessor(
     }
 }
 
+/**
+ * The original page-anchor measurement loop, shared without changing scoring / mapping math.
+ * Caller owns an independent matcher and clears its prepared frame in finally.
+ */
+internal fun measureLabyrinthEntryAnchors(
+    frame: PixelImage,
+    templates: LabyrinthEntryTemplateSet,
+    matcher: GradientTemplateMatcher,
+    preScaledTemplates: PreScaledEntryTemplates?,
+): Map<String, EntryAnchorMatch?> {
+    val preScaled = preScaledTemplates
+        ?.takeIf { it.frameWidth == frame.width && it.frameHeight == frame.height }
+    return LabyrinthEntryFrameProcessor.DEFINITIONS_BY_ID.mapValues { (id, definitions) ->
+        val template = templates.values[id]
+            ?: return@mapValues null
+        definitions.mapNotNull { definition ->
+            val mapped = when (definition.mapping) {
+                EntryReferenceMapping.COVER -> ReferenceCoverMapper.map(
+                    frameWidth = frame.width,
+                    frameHeight = frame.height,
+                    referenceSize = definition.referenceSize,
+                    referenceRect = definition.referenceRect,
+                )
+                EntryReferenceMapping.FIT -> ReferenceFitMapper.map(
+                    frameWidth = frame.width,
+                    frameHeight = frame.height,
+                    referenceSize = definition.referenceSize,
+                    referenceRect = definition.referenceRect,
+                )
+            }
+            mapped?.let { rect ->
+                EntryAnchorMatch(
+                    score = matcher.score(
+                        frame,
+                        rect,
+                        preScaled?.templates?.get(definition) ?: template,
+                    ),
+                    rect = rect,
+                )
+            }
+        }.maxByOrNull(EntryAnchorMatch::score)
+    }
+}
+
 object ReferenceCoverMapper {
     fun map(
         frameWidth: Int,
@@ -1078,6 +1091,7 @@ class GradientTemplateMatcher(
         // The loop below leaves the outer border untouched; a fresh array had it at zero.
         java.util.Arrays.fill(gradients, 0.toShort())
         for (y in 1 until frame.height - 1) {
+            if ((y and 31) == 0) com.landosol.toolbox.labyrinth.concurrent.LabyrinthFourThreadRuntime.checkpoint()
             for (x in 1 until frame.width - 1) {
                 val at = y * frame.width + x
                 gradients[at] = (abs((lights[at + 1].toInt() and 255) - (lights[at - 1].toInt() and 255)) +
@@ -1098,6 +1112,7 @@ class GradientTemplateMatcher(
         template: PixelImage,
         minimumChannelScore: Double = 0.0,
     ): Double {
+        com.landosol.toolbox.labyrinth.concurrent.LabyrinthFourThreadRuntime.cooperate()
         if (rect.width < 3 || rect.height < 3 || template.width < 3 || template.height < 3) return 0.0
         val stats = stats(template)
         if (stats.points.isEmpty()) return 0.0
@@ -1176,6 +1191,7 @@ class GradientTemplateMatcher(
         val luminances = ArrayList<Double>()
         var y = 1
         while (y < template.height - 1) {
+            com.landosol.toolbox.labyrinth.concurrent.LabyrinthFourThreadRuntime.checkpoint()
             var x = 1
             while (x < template.width - 1) {
                 // Node templates are PNGs with transparent pixels outside the

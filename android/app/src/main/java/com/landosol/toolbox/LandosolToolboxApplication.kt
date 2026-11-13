@@ -267,19 +267,49 @@ class LandosolToolboxApplication : Application() {
                 AndroidLabyrinthEntryFrameProcessor.create(
                     context = this,
                     characterAttributes = characterAttributes,
-                    finalBossOnly = finalBossOnly,
-                    skipJoinedCharacters = { labyrinthEntryRecognitionSession.skipRoleRewardJoinedRecognition },
-                    relicEvidenceVersion = { labyrinthEntryRecognitionSession.relicEvidenceVersion },
-                    relicVerificationMarks = { labyrinthEntryRecognitionSession.relicVerificationMarks },
-                    nodeSearchHint = { labyrinthEntryRecognitionSession.currentNodeSearchHint() },
+                    finalBossOnly = {
+                        val snapshot = com.landosol.toolbox.labyrinth.LabyrinthBalancedVisionContext.current()
+                        if (snapshot != null) snapshot.finalBossOnly else finalBossOnly()
+                    },
+                    skipJoinedCharacters = {
+                        val snapshot = com.landosol.toolbox.labyrinth.LabyrinthBalancedVisionContext.current()
+                        if (snapshot != null) snapshot.skipJoinedCharacters else labyrinthEntryRecognitionSession.skipRoleRewardJoinedRecognition
+                    },
+                    relicEvidenceVersion = {
+                        val snapshot = com.landosol.toolbox.labyrinth.LabyrinthBalancedVisionContext.current()
+                        if (snapshot != null) snapshot.relicEvidenceVersion else labyrinthEntryRecognitionSession.relicEvidenceVersion
+                    },
+                    relicVerificationMarks = {
+                        val snapshot = com.landosol.toolbox.labyrinth.LabyrinthBalancedVisionContext.current()
+                        if (snapshot != null) snapshot.relicVerificationMarks else labyrinthEntryRecognitionSession.relicVerificationMarks
+                    },
+                    nodeSearchHint = {
+                        val snapshot = com.landosol.toolbox.labyrinth.LabyrinthBalancedVisionContext.current()
+                        if (snapshot != null) snapshot.nodeSearchHint else labyrinthEntryRecognitionSession.currentNodeSearchHint()
+                    },
                     nodeScanRequested = { labyrinthEntryRecognitionSession.nodeScanRequested() },
                     nodeScanConsumable = { labyrinthEntryRecognitionSession.nodeScanConsumable() },
-                    rosterCharacterIds = { labyrinthEntryRecognitionSession.rosterCharacterIds() },
+                    rosterCharacterIds = {
+                        val snapshot = com.landosol.toolbox.labyrinth.LabyrinthBalancedVisionContext.current()
+                        if (snapshot != null) snapshot.rosterCharacterIds else labyrinthEntryRecognitionSession.rosterCharacterIds()
+                    },
                     captureFrameSize = CaptureStateRegistry::captureSize,
                     eventChoiceOverrides = labyrinthEntryRecognitionSession.eventChoiceOverridesSnapshot,
                     eventCustomizationEnabled = labyrinthEntryRecognitionSession.eventCustomizationEnabledSnapshot,
-                    allowInitial1088GeometryRefinement = { labyrinthEntryRecognitionSession.allowInitial1088GeometryRefinement() },
+                    allowInitial1088GeometryRefinement = {
+                        val snapshot = com.landosol.toolbox.labyrinth.LabyrinthBalancedVisionContext.current()
+                        if (snapshot != null) snapshot.allowInitial1088GeometryRefinement else labyrinthEntryRecognitionSession.allowInitial1088GeometryRefinement()
+                    },
                 )::process
+            },
+            fastProcessorFactory = {
+                val observer = com.landosol.toolbox.labyrinth.vision.AndroidLabyrinthFastFrameObserver.create(
+                    this, CaptureStateRegistry::captureSize,
+                )
+                observer::process
+            },
+            fastFramePublisher = debugDashboard?.let { dashboard ->
+                { fast, state -> dashboard.publishFast(fast, state) }
             },
             captureStop = { MediaProjectionCaptureService.stop(this) },
             overlayCoordinator = automationOverlayCoordinator,

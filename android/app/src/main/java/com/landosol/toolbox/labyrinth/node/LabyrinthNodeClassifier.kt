@@ -592,6 +592,7 @@ class LabyrinthNodeClassifier(
         templates: NodeTemplateSet,
         searchHint: NodeSearchHint? = null,
     ): List<NodeClassification> {
+        com.landosol.toolbox.labyrinth.concurrent.LabyrinthFourThreadRuntime.cooperate()
         if (templates.templates.isEmpty()) return emptyList()
         if (searchHint?.targetBlockId != hintedTargetBlockId) {
             hintedTargetBlockId = searchHint?.targetBlockId

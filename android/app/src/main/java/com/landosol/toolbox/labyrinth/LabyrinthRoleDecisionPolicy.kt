@@ -1,10 +1,10 @@
 package com.landosol.toolbox.labyrinth
 
+import com.landosol.toolbox.labyrinth.concurrent.LabyrinthFourThreadRuntime
 import kotlinx.serialization.Serializable
 import java.util.PriorityQueue
 import java.util.concurrent.Callable
 import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
 import kotlin.math.max
 
 @Serializable
@@ -21,20 +21,14 @@ enum class LabyrinthCharacterAttribute(val label: String) {
 private val ATTRIBUTE_SLOTS = LabyrinthCharacterAttribute.values()
 private val ATTRIBUTE_SLOT_COUNT = ATTRIBUTE_SLOTS.size
 
-/**
- * Worker threads for the formation search. Not the CPU count on purpose: the game shares the
- * virtual machine, and the fork this was ported from measured 4 threads at 0.58x wall-clock and
- * 8 at 0.45x, i.e. more threads made the whole run slower, not faster.
- */
-private const val ROLE_SEARCH_THREADS = 4
+/** Default shard budget; explicitly requesting four shards still uses the same two workers. */
+private const val ROLE_SEARCH_THREADS = 2
 
 /** Below this many combinations the thread hand-off costs more than it saves. */
 private const val PARALLEL_MIN_COMBINATIONS = 512
 
-/** One process-wide pool: a run calls the search many times and must not spin threads up each time. */
-private val ROLE_SEARCH_EXECUTOR: ExecutorService = Executors.newFixedThreadPool(ROLE_SEARCH_THREADS) { runnable ->
-    Thread(runnable, "labyrinth-role-search").apply { isDaemon = true }
-}
+/** Alias, not a second pool. Helping joins permit this synchronous API on a CPU parent. */
+private val ROLE_SEARCH_EXECUTOR: ExecutorService = LabyrinthFourThreadRuntime.computeExecutor
 
 /**
  * A role can join either physical or magic cores only when its combat contribution is genuinely
@@ -1373,6 +1367,7 @@ class LabyrinthTeamOptimizer(
         forbidMixedDamageSystem: Boolean = false,
         requiredCharacterIds: Set<String> = emptySet(),
     ): List<LabyrinthTeamEvaluation> {
+        LabyrinthFourThreadRuntime.cooperate()
         val unique = roster.distinctBy(LabyrinthRoleProfile::characterId)
         if (unique.isEmpty()) return emptyList()
         if (requiredCharacterId != null && unique.none { it.characterId == requiredCharacterId }) return emptyList()
@@ -1416,6 +1411,7 @@ class LabyrinthTeamOptimizer(
             val best = PriorityQueue(order)
             var ordinal = 0L
             visitCombinations(searchPool, size) { team ->
+                if ((ordinal and 31L) == 0L) LabyrinthFourThreadRuntime.cooperate()
                 filter.offer(team, ordinal++, best, limit)
             }
             best.sortedWith(order.reversed())
@@ -1492,6 +1488,7 @@ class LabyrinthTeamOptimizer(
                 val from = chunk * chunkSize
                 val until = minOf(comboCount, from + chunkSize)
                 for (index in from until until) {
+                    if ((index and 31) == 0) LabyrinthFourThreadRuntime.cooperate()
                     team.clear()
                     val base = index * size
                     for (slot in 0 until size) team.add(searchPool[flat[base + slot]])
@@ -1572,6 +1569,7 @@ class LabyrinthTeamOptimizer(
     )
 
     private fun individualSearchPriority(role: LabyrinthRoleProfile, context: LabyrinthRoleDecisionContext): Double {
+        LabyrinthFourThreadRuntime.checkpoint()
         val targetCount = context.targetCount
         val physical = when (targetCount.coerceAtMost(3)) {
             1 -> role.physicalDamage1Target
