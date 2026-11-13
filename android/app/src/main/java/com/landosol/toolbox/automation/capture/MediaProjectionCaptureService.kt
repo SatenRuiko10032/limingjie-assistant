@@ -319,6 +319,9 @@ class MediaProjectionCaptureService : Service() {
     }
 
     private fun onImageAvailable(source: ImageReader) {
+        CaptureTelemetry.callback()
+        val capturedAtElapsed = SystemClock.elapsedRealtime()
+        var conversionMillis: Long? = null
         val now = System.currentTimeMillis()
         var bitmap: Bitmap? = null
         var conversionError: Throwable? = null
@@ -339,17 +342,23 @@ class MediaProjectionCaptureService : Service() {
         }
         synchronized(captureLock) {
             val image = runCatching { source.acquireLatestImage() }.getOrNull() ?: return
+            CaptureTelemetry.acquired()
             if (rotation == null) {
+                CaptureTelemetry.intervalDropped()
                 runCatching { image.close() }
             } else if (!rotation.deliversFrame) {
+                CaptureTelemetry.orientationDropped()
                 // A rotated mirror is letterboxed portrait content; never hand it to a recognizer.
                 lastFrameAt = now
                 runCatching { image.close() }
             } else {
                 lastFrameAt = now
                 try {
+                    val conversionStarted = System.nanoTime()
                     bitmap = imageToBitmap(image)
+                    conversionMillis = (System.nanoTime() - conversionStarted) / 1_000_000
                 } catch (error: Throwable) {
+                    CaptureTelemetry.conversionError()
                     conversionError = error
                 } finally {
                     // Close the acquired image before another thread can close/rebuild the reader.
@@ -357,7 +366,12 @@ class MediaProjectionCaptureService : Service() {
                 }
             }
         }
-        bitmap?.let { CaptureFrameBus.dispatch(CapturedFrame(it, now)) }
+        bitmap?.let {
+            CaptureFrameBus.dispatch(CapturedFrame(it, now,
+                frameSequence = CaptureTelemetry.converted(),
+                captureConvertMillis = conversionMillis,
+                capturedAtElapsedRealtimeMillis = capturedAtElapsed))
+        }
         conversionError?.let { error ->
             stopCapture("读取屏幕帧失败：${error.message ?: "未知错误"}")
         }

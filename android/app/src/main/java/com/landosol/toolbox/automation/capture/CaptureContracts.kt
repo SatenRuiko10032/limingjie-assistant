@@ -22,6 +22,11 @@ sealed interface CaptureState {
 data class CapturedFrame(
     val bitmap: Bitmap,
     val timestampMillis: Long,
+    /** Diagnostics only. Null means this producer does not publish monotonic metadata. */
+    val frameSequence: Long = 0L,
+    val captureConvertMillis: Long? = null,
+    val capturedAtElapsedRealtimeMillis: Long? = null,
+    val enqueuedAtElapsedRealtimeMillis: Long? = null,
 )
 
 /**
@@ -71,6 +76,7 @@ object CaptureFrameBus {
     internal fun dispatch(frame: CapturedFrame) {
         val current = synchronized(this) { registration }
         if (current == null) {
+            CaptureTelemetry.noConsumerDropped()
             frame.bitmap.recycle()
             return
         }

@@ -1,6 +1,8 @@
 package com.landosol.toolbox.labyrinth
 
 import android.util.Log
+import android.os.SystemClock
+import com.landosol.toolbox.automation.capture.FrameQueueMetrics
 import com.landosol.toolbox.automation.AutomationMode
 import com.landosol.toolbox.automation.AutomationActionResult
 import com.landosol.toolbox.automation.AutomationSessionId
@@ -816,7 +818,10 @@ internal fun labyrinthEffectiveScanRosterStamp(characterIds: Collection<String>)
 internal fun labyrinthNodeScanConsumable(
     settleRemainingMillis: Long,
     pendingTransitionHeld: Boolean,
-): Boolean = settleRemainingMillis <= 0L && !pendingTransitionHeld
+    relicAcquisitionHeld: Boolean = false,
+    relicVerificationHeld: Boolean = false,
+): Boolean = settleRemainingMillis <= 0L && !pendingTransitionHeld &&
+    !relicAcquisitionHeld && !relicVerificationHeld
 
 /**
  * Milliseconds a post-entry tap's cooldown still has to run when a frame captured at
@@ -1090,6 +1095,7 @@ data class LabyrinthEntryRecognitionSessionState(
     val message: String? = null,
     /** Diagnostic trace for the frame that produced [lastResult]; never read for decisions. */
     val frameTrace: LabyrinthFrameTrace = LabyrinthFrameTrace(),
+    val frameTiming: LabyrinthFrameTiming? = null,
 ) {
     val running: Boolean get() = status == LabyrinthEntryRecognitionStatus.RUNNING
 }
@@ -1169,6 +1175,8 @@ class LabyrinthEntryRecognitionSession(
 
     @Volatile
     private var channelPromptMessage: String? = null
+    private val frameQueueMetrics = FrameQueueMetrics()
+    private var lastNodeScanHoldReason: String? = null
     private val queuedFrame = AtomicReference<QueuedFrame?>(null)
     private val frameWorkerRunning = AtomicBoolean(false)
     private val actionPlannerLock = Any()
@@ -1216,9 +1224,21 @@ class LabyrinthEntryRecognitionSession(
             },
             nodeSelectionFramesSinceAction = pending.nodeSelectionFramesSinceAction + 1,
         )
+        val dryRun = _state.value.dryRun
+        val acquisitionHeld = !dryRun && relicChoiceCommitted && pendingRelicSelection != null
+        val verificationHeld = !dryRun && relicStackLedger.peekWaitingForMap(now)
+        lastNodeScanHoldReason = when {
+            settleRemaining > 0L -> "MAP_SETTLE"
+            pendingHeld -> "PENDING_NODE_TRANSITION"
+            acquisitionHeld -> "RELIC_ACQUISITION"
+            verificationHeld -> "RELIC_MAP_VERIFICATION"
+            else -> null
+        }
         return labyrinthNodeScanConsumable(
             settleRemainingMillis = settleRemaining,
             pendingTransitionHeld = pendingHeld,
+            relicAcquisitionHeld = acquisitionHeld,
+            relicVerificationHeld = verificationHeld,
         )
     }
 
@@ -1921,6 +1941,7 @@ class LabyrinthEntryRecognitionSession(
             _state.value = _state.value.copy(status = LabyrinthEntryRecognitionStatus.ERROR, message = reason)
             return LabyrinthEntryRecognitionStartResult.Blocked(reason)
         }
+        frameQueueMetrics.reset()
         val registration = CaptureFrameBus.register(OWNER) { frame ->
             enqueueLatestFrame(session.id, processor, frame)
         }
@@ -2187,18 +2208,23 @@ class LabyrinthEntryRecognitionSession(
         processor: (CapturedFrame) -> LabyrinthEntryFrameResult,
         frame: CapturedFrame,
     ) {
+        frameQueueMetrics.seen()
         if (activeSessionId != sessionId || _state.value.paused) {
+            frameQueueMetrics.invalidDropped()
             recycle(frame)
             return
         }
         if (lastProcessedAt != Long.MIN_VALUE && frame.timestampMillis - lastProcessedAt < responseIntervalMillis) {
+            frameQueueMetrics.intervalDropped()
             recycle(frame)
             return
         }
         lastProcessedAt = frame.timestampMillis
 
-        val replaced = queuedFrame.getAndSet(QueuedFrame(sessionId, processor, frame))
-        replaced?.let { recycle(it.frame) }
+        frameQueueMetrics.accepted()
+        val queued = frame.copy(enqueuedAtElapsedRealtimeMillis = SystemClock.elapsedRealtime())
+        val replaced = queuedFrame.getAndSet(QueuedFrame(sessionId, processor, queued))
+        replaced?.let { frameQueueMetrics.replaced(); recycle(it.frame) }
         ensureFrameWorker()
     }
 
@@ -2252,8 +2278,13 @@ class LabyrinthEntryRecognitionSession(
         _state.value = beforeProcessing.copy(
             receivedFrameCount = beforeProcessing.receivedFrameCount + 1,
         )
+        val workerStarted = SystemClock.elapsedRealtime()
         runCatching {
+            lastNodeScanHoldReason = null
+            val visionStarted = System.nanoTime()
             val result = processor(frame)
+            val measuredVisionMillis = (System.nanoTime() - visionStarted) / 1_000_000
+            val handlingStarted = System.nanoTime()
             // stop()/pause may run while an expensive frame is being recognized. Never let that
             // stale result mutate a stopped/paused session or publish an old dashboard frame.
             if (activeSessionId != sessionId || _state.value.paused) return@runCatching
@@ -2265,6 +2296,17 @@ class LabyrinthEntryRecognitionSession(
                 timestampMillis = frame.timestampMillis,
             )
             if (activeSessionId != sessionId || _state.value.paused) return@runCatching
+            _state.value = _state.value.copy(frameTiming = LabyrinthFrameTiming(
+                frameSequence = frame.frameSequence,
+                captureConvertMillis = frame.captureConvertMillis,
+                captureToWorkerMillis = frame.capturedAtElapsedRealtimeMillis?.let { (workerStarted - it).coerceAtLeast(0L) },
+                queueWaitMillis = frame.enqueuedAtElapsedRealtimeMillis?.let { (workerStarted - it).coerceAtLeast(0L) },
+                visionMillis = measuredVisionMillis,
+                sessionHandlingMillis = (System.nanoTime() - handlingStarted) / 1_000_000,
+                responseIntervalMillis = responseIntervalMillis,
+                queue = frameQueueMetrics.snapshot(),
+                nodeScanHoldReason = lastNodeScanHoldReason,
+            ))
             debugFramePublisher?.invoke(
                 frame,
                 _state.value,
@@ -9224,7 +9266,10 @@ class LabyrinthEntryRecognitionSession(
                     add("第一队建议不可用：$it")
                 }
             }
-            add("原始帧：${current.receivedFrameCount}")
+            add("进入处理帧：${current.receivedFrameCount}")
+            current.lastActionLabel?.let { add("最近动作记录：$it") }
+            if (current.roleRewardChoiceDecision != null) add("角色建议为当前预览；以动作记录和游戏反馈为准")
+            pendingBattleTeamAction?.let { add("编组动作等待反馈：${it.label}") }
             add("识别帧：${current.frameCount}")
             if (pageOwner == LabyrinthPageUiOwner.NODE_SELECTION) {
                 nodeRelicStackSummary(result)?.let { add("地图遗物：$it") }
@@ -9303,7 +9348,7 @@ class LabyrinthEntryRecognitionSession(
                     when (val decision = current.roleRewardChoiceDecision) {
                         is LabyrinthRoleRewardChoiceDecision.Select -> {
                             add(
-                                "角色三选一建议：${decision.characterId} ${decision.displayName}" +
+                                "角色三选一建议（预览）：${decision.characterId} ${decision.displayName}" +
                                     if (decision.actionSafe) "" else "（仅推荐）",
                             )
                             decision.safetyNote?.let { add("推荐安全状态：$it") }
@@ -9373,13 +9418,17 @@ class LabyrinthEntryRecognitionSession(
                             "$prefix$identity[$attribute$bonus$currentStacks](${"%.2f".format(relic.confidence)}/差${"%.2f".format(relic.rivalMargin)})"
                         },
                     )
+                    val lockedRelic = pendingRelicSelection?.takeIf { relicChoiceCommitted }
+                    if (lockedRelic != null) {
+                        add("已派发遗物选择（等待确认）：${lockedRelic.displayName ?: lockedRelic.relicId}")
+                    }
                     relicChoicePolicy.choose(
                         acquired = current.observedRelics,
                         candidates = relics.choices,
                         calibratedStacks = relicMarkStackCalibration,
                         currentArea = current.routeProgress?.currentArea,
                         lockedFocus = relicFocusMark,
-                    )?.let { decision ->
+                    )?.takeIf { lockedRelic == null }?.let { decision ->
                         add("当前建议：${decision.choice.displayName ?: "未收录"} · ${decision.reason}")
                     }
                 }
@@ -9416,7 +9465,10 @@ class LabyrinthEntryRecognitionSession(
                                 }
                             },
                         )
-                        currentShopDecision(result)?.let { decision ->
+                        if (plannedShopPurchaseStartedAt != Long.MIN_VALUE) {
+                            add("锁定购买目标（等待交易结果）：${pendingShopPurchase?.displayName ?: plannedShopPurchaseRelicId ?: plannedShopRoleImprintLabel ?: "确认中"}")
+                        }
+                        currentShopDecision(result)?.takeIf { plannedShopPurchaseStartedAt == Long.MIN_VALUE }?.let { decision ->
                             add(
                                 "商店策略：" + when (decision) {
                                     is LabyrinthShopDecision.BuyRelic ->
