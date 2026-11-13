@@ -1416,8 +1416,7 @@ class LabyrinthTeamOptimizer(
             val best = PriorityQueue(order)
             var ordinal = 0L
             visitCombinations(searchPool, size) { team ->
-                val candidate = filter.evaluate(team, ordinal++) ?: return@visitCombinations
-                offer(best, candidate, limit)
+                filter.offer(team, ordinal++, best, limit)
             }
             best.sortedWith(order.reversed())
         }
@@ -1433,29 +1432,37 @@ class LabyrinthTeamOptimizer(
         private val forbidMixedDamageSystem: Boolean,
         private val systemOnly: Boolean,
     ) {
-        fun evaluate(team: List<LabyrinthRoleProfile>, ordinal: Long): RankedCandidate? {
-            if (requiredCharacterId != null && team.none { it.characterId == requiredCharacterId }) return null
-            if (requiredCharacterIds.isNotEmpty() && !requiredCharacterIds.all { id -> team.any { it.characterId == id } }) return null
-            if (vanguardGate != null && !team.hasEligibleVanguardAtActualFront(context, vanguardGate)) return null
+        fun offer(team: List<LabyrinthRoleProfile>, ordinal: Long, best: PriorityQueue<RankedCandidate>, limit: Int) {
+            if (requiredCharacterId != null && team.none { it.characterId == requiredCharacterId }) return
+            if (requiredCharacterIds.isNotEmpty() && !requiredCharacterIds.all { id -> team.any { it.characterId == id } }) return
+            if (vanguardGate != null && !team.hasEligibleVanguardAtActualFront(context, vanguardGate)) return
             val evaluation = scorer.evaluateForSearch(team, context)
             if (forbidMixedDamageSystem &&
                 evaluation.damageType != LabyrinthTeamDamageType.PHYSICAL &&
                 evaluation.damageType != LabyrinthTeamDamageType.MAGIC
             ) {
-                return null
+                return
             }
             val score = if (systemOnly) evaluation.systemScore else evaluation.score
-            return RankedCandidate(evaluation.members, score, ordinal,
-                labyrinthEncounterFormationRisk(team, context))
+            val formationRisk = labyrinthEncounterFormationRisk(team, context)
+            val worst = best.peek()
+            // Same lexicographic comparison as `order`, including Double.compare for signed
+            // zero/NaN and enumeration ordinals. Only retained candidates need a wrapper object.
+            val improves = worst != null && isBetter(score, formationRisk, ordinal, worst)
+            if (best.size < limit || improves) {
+                if (best.size == limit) best.poll()
+                // evaluateForSearch returns independent members; both walks may reuse `team`.
+                best.add(RankedCandidate(evaluation.members, score, ordinal, formationRisk))
+            }
         }
     }
 
-    private fun offer(best: PriorityQueue<RankedCandidate>, candidate: RankedCandidate, limit: Int) {
-        val worst = best.peek()
-        if (best.size < limit || (worst != null && requireNotNull(best.comparator()).compare(candidate, worst) > 0)) {
-            if (best.size == limit) best.poll()
-            best.add(candidate)
-        }
+    private fun isBetter(score: Double, formationRisk: Int, ordinal: Long, worst: RankedCandidate): Boolean {
+        val riskComparison = worst.formationRisk.compareTo(formationRisk)
+        if (riskComparison != 0) return riskComparison > 0
+        val scoreComparison = java.lang.Double.compare(score, worst.score)
+        if (scoreComparison != 0) return scoreComparison > 0
+        return worst.ordinal.compareTo(ordinal) > 0
     }
 
     /**
@@ -1473,11 +1480,9 @@ class LabyrinthTeamOptimizer(
         limit: Int,
         order: Comparator<RankedCandidate>,
     ): List<RankedCandidate> {
-        // One flat index buffer for every combination (C(24,5) x 5 = 212,520 ints, ~850 KB)
-        // instead of tens of thousands of small arrays, which would be a single-threaded
-        // allocation storm that eats the parallel gain.
-        val flat = IntArray(comboCount * size)
-        fillCombinationIndices(searchPool.size, size, flat)
+        // Only (n,k) lexicographic indices are shared; roster/context/evaluation remain call-local.
+        // Oversize dimensions keep the original fresh table rather than becoming resident.
+        val flat = LabyrinthCombinationIndexCache.shared.get(searchPool.size, size, comboCount)
         val chunkCount = minOf(searchThreads, comboCount)
         val chunkSize = (comboCount + chunkCount - 1) / chunkCount
         val tasks = (0 until chunkCount).map { chunk ->
@@ -1490,9 +1495,7 @@ class LabyrinthTeamOptimizer(
                     team.clear()
                     val base = index * size
                     for (slot in 0 until size) team.add(searchPool[flat[base + slot]])
-                    val candidate = filter.evaluate(team, index.toLong()) ?: continue
-                    // The candidate keeps evaluation.members, a fresh list, so reusing `team` is safe.
-                    offer(best, candidate, limit)
+                    filter.offer(team, index.toLong(), best, limit)
                 }
                 best.toList()
             }
@@ -1510,26 +1513,6 @@ class LabyrinthTeamOptimizer(
         var result = 1L
         for (index in 0 until k) result = result * (n - index) / (index + 1)
         return result
-    }
-
-    /** Writes every k-combination of 0 until n in the same lexicographic order as [visitCombinations]. */
-    private fun fillCombinationIndices(n: Int, k: Int, target: IntArray) {
-        val working = IntArray(k)
-        var position = 0
-        fun visit(start: Int, depth: Int) {
-            if (depth == k) {
-                val base = position * k
-                for (slot in 0 until k) target[base + slot] = working[slot]
-                position++
-                return
-            }
-            val remaining = k - depth
-            for (index in start..n - remaining) {
-                working[depth] = index
-                visit(index + 1, depth + 1)
-            }
-        }
-        visit(0, 0)
     }
 
     /**
