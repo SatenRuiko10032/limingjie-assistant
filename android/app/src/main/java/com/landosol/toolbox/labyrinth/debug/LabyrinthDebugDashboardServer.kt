@@ -36,7 +36,7 @@ import org.json.JSONObject
  * http://127.0.0.1:8765/ directly. For a browser on the host PC, expose it with
  * `adb forward tcp:8765 tcp:8765` first.
  */
-internal const val LABYRINTH_DEBUG_HISTORY_LIMIT = 3000
+internal const val LABYRINTH_DEBUG_HISTORY_LIMIT = 600
 
 class LabyrinthDebugDashboardServer(
     private val port: Int = DEFAULT_PORT,
@@ -349,7 +349,7 @@ class LabyrinthDebugDashboardServer(
                     appendLine("runtime/history.ndjson: 每 10 秒后台采样的进程 CPU/内存与捕获状态，最多保留约 1 小时；不包含电脑端负载")
                     appendLine("state/latest.json: 最近已发布的详细识别快照；不等于最新快观察")
                     appendLine("state/history.ndjson: 最近 ${history.size} 条详细识别状态历史")
-                    appendLine("fast/latest.json 与 fast/history.ndjson: 独立快观察/控制状态，最多3000条；先核对两个流的frameSequence与timestamp，不能拿快页面给旧详细框背书；未启用时available=false")
+                    appendLine("fast/latest.json 与 fast/history.ndjson: 独立快观察/控制状态，最多${LABYRINTH_DEBUG_HISTORY_LIMIT}条；先核对两个流的frameSequence与timestamp，不能拿快页面给旧详细框背书；未启用时available=false")
                     appendLine(
                         "frame/latest.jpg: 最近一帧截图（若已有）；对应 frameVersion=" +
                             "${snapshot.frameVersion}，拍摄于 ${snapshot.jpegMillis}。" +
@@ -839,7 +839,7 @@ class LabyrinthDebugDashboardServer(
     private companion object {
         const val LOG_TAG = "LabyrinthDebugHttp"
         const val IPV4_LOOPBACK = "127.0.0.1"
-        const val DEFAULT_PORT = 8766
+        const val DEFAULT_PORT = 8765
         const val JPEG_QUALITY = 68
         const val JPEG_REFRESH_INTERVAL_MILLIS = 750L
         const val FRAME_ARCHIVE_WIDTH = 960
@@ -868,7 +868,6 @@ class LabyrinthDebugDashboardServer(
             </head>
             <body>
               <header><strong>黎明界实时分析</strong><span class="pill">${AppVersion.label}</span><span class="pill" id="status">等待数据</span><span class="pill" id="page">-</span><span class="muted" id="stamp"></span><a class="pill action" href="/logs.zip">下载日志 ZIP</a><a class="pill action" href="#" id="archiveToggle">逐帧归档：读取中</a></header>
-              <section class="card" style="margin:14px 14px 0"><h2>快速观察与控制（独立于下方详细图像）</h2><div id="fastSummary">快观察：等待数据</div><div class="muted">下方图片与框来自最近详细识别，不是最新快观察；快观察不直接作为点击或业务ACK。</div></section>
               <main class="grid">
                 <section class="card"><div class="frameWrap" id="frameWrap"><img id="frame" alt="latest frame"></div></section>
                 <section class="stack">
@@ -905,7 +904,7 @@ class LabyrinthDebugDashboardServer(
                 async function refreshArchive(){try{const r=await fetch('/api/archive',{cache:'no-store'});const a=await r.json();archiveOn=!!a.enabled;const t=document.getElementById('archiveToggle');t.textContent=a.supported?('逐帧归档：'+(a.enabled?'开('+a.frames+')':'关')):'逐帧归档：不可用';}catch(e){}}
                 document.getElementById('archiveToggle').addEventListener('click',async ev=>{ev.preventDefault();try{await fetch(archiveOn?'/api/archive/off':'/api/archive/on',{cache:'no-store'});}catch(e){}refreshArchive();});
                 refreshArchive();setInterval(refreshArchive,3000);
-                async function tick(){try{const r=await fetch('/api/state',{cache:'no-store'});const d=await r.json();const f=d.fastObservation;if(f&&f.available){const b=f.balancedDiagnostics||{};const st=f.paused?'已暂停':f.running?'运行中':f.status==='STOPPED'?'已停止':(f.status||'-');setTextStable(document.getElementById('fastSummary'),'快速状态：'+st+' · 页面 '+(f.page||'-')+' · 帧 '+(f.frameSequence??0)+' · 观察 '+(f.elapsedMillis??0)+'ms · 规划在途 '+(b.plannerPendingCount??0)+' · 重识别 '+(b.detailActive?'进行中':'空闲')+' · 最后观察 '+new Date(f.timestamp||0).toLocaleTimeString());}else{setTextStable(document.getElementById('fastSummary'),'快观察尚未启用或等待首帧；详细兼容流程见下方');}setTextStable(document.getElementById('status'),d.status||'-');setTextStable(document.getElementById('page'),(d.page||'-')+' '+Number(d.pageConfidence||0).toFixed(3));setTextStable(document.getElementById('stamp'),new Date(d.timestamp||Date.now()).toLocaleTimeString());setTextStable(document.getElementById('detail'),d.detail||'');void refreshRoute(d);const frameSize=(d.frameWidth??0)+' × '+(d.frameHeight??0);setHtmlStable(document.getElementById('summary'),'<b>进入处理帧</b><span>'+(d.receivedFrameCount??0)+'</span><b>识别帧</b><span>'+(d.recognizedFrameCount??0)+'</span><b>捕获尺寸</b><span>'+frameSize+'</span><b>宽高比</b><span>'+Number(d.frameAspectRatio||0).toFixed(3)+'</span><b>耗时</b><span>'+(d.elapsedMillis??0)+' ms</span><b>动作</b><span>'+(d.actionCount??0)+'</span><b>消息</b><span>'+esc(d.message??'')+'</span>');const compact={fastObservation:d.fastObservation,balancedDiagnostics:d.balancedDiagnostics,frameTiming:d.frameTiming,captureCounters:d.captureCounters,historyLimit:d.historyLimit,trace:d.trace,stageMillis:d.stageMillis,nodeSearchMode:d.nodeSearchMode,nodeSearchWindowCount:d.nodeSearchWindowCount,finalBossPlatforms:d.finalBossPlatforms,finalBossPlatformCandidates:d.finalBossPlatformCandidates,frame:{width:d.frameWidth,height:d.frameHeight,aspectRatio:d.frameAspectRatio},openingViewport:d.openingViewport,nodeRelicStacks:d.nodeRelicStacks,relicChoices:d.relicChoices,characters:d.characters,nodes:d.nodes,pageScores:d.pageScores,anchorScores:d.anchorScores,matchedFeatures:d.matchedFeatures};setTextStable(document.getElementById('json'),JSON.stringify(compact,null,2));drawBoxes(d.boxes);if(d.frameVersion!==frameVersion){frameVersion=d.frameVersion;document.getElementById('frame').src='/frame.jpg?v='+frameVersion}}catch(e){setTextStable(document.getElementById('status'),'连接失败')}finally{setTimeout(tick,500)}}tick();
+                async function tick(){try{const r=await fetch('/api/state',{cache:'no-store'});const d=await r.json();setTextStable(document.getElementById('status'),d.status||'-');setTextStable(document.getElementById('page'),(d.page||'-')+' '+Number(d.pageConfidence||0).toFixed(3));setTextStable(document.getElementById('stamp'),new Date(d.timestamp||Date.now()).toLocaleTimeString());setTextStable(document.getElementById('detail'),d.detail||'');void refreshRoute(d);const frameSize=(d.frameWidth??0)+' × '+(d.frameHeight??0);setHtmlStable(document.getElementById('summary'),'<b>进入处理帧</b><span>'+(d.receivedFrameCount??0)+'</span><b>识别帧</b><span>'+(d.recognizedFrameCount??0)+'</span><b>捕获尺寸</b><span>'+frameSize+'</span><b>宽高比</b><span>'+Number(d.frameAspectRatio||0).toFixed(3)+'</span><b>耗时</b><span>'+(d.elapsedMillis??0)+' ms</span><b>动作</b><span>'+(d.actionCount??0)+'</span><b>消息</b><span>'+esc(d.message??'')+'</span>');const compact={frameTiming:d.frameTiming,captureCounters:d.captureCounters,historyLimit:d.historyLimit,trace:d.trace,stageMillis:d.stageMillis,nodeSearchMode:d.nodeSearchMode,nodeSearchWindowCount:d.nodeSearchWindowCount,finalBossPlatforms:d.finalBossPlatforms,finalBossPlatformCandidates:d.finalBossPlatformCandidates,frame:{width:d.frameWidth,height:d.frameHeight,aspectRatio:d.frameAspectRatio},openingViewport:d.openingViewport,nodeRelicStacks:d.nodeRelicStacks,relicChoices:d.relicChoices,characters:d.characters,nodes:d.nodes,pageScores:d.pageScores,anchorScores:d.anchorScores,matchedFeatures:d.matchedFeatures};setTextStable(document.getElementById('json'),JSON.stringify(compact,null,2));drawBoxes(d.boxes);if(d.frameVersion!==frameVersion){frameVersion=d.frameVersion;document.getElementById('frame').src='/frame.jpg?v='+frameVersion}}catch(e){setTextStable(document.getElementById('status'),'连接失败')}finally{setTimeout(tick,500)}}tick();
               </script>
             </body>
             </html>

@@ -7,7 +7,7 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class Batch1DiagnosticsTest {
-    @Test fun `history limit is exactly three thousand`() { assertEquals(3000, LABYRINTH_DEBUG_HISTORY_LIMIT) }
+    @Test fun `history limit is exactly six hundred`() { assertEquals(600, LABYRINTH_DEBUG_HISTORY_LIMIT) }
     @Test fun `queue counters distinguish acceptance replacement and filtering`() {
         val m = FrameQueueMetrics()
         m.seen(); m.accepted(); m.seen(); m.accepted(); m.replaced()
