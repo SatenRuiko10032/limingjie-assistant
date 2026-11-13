@@ -1767,10 +1767,13 @@ class LabyrinthRoleChoicePolicy(
             )
         }
         val acquired = scoringAcquiredIds.map(profiles::getValue)
+        // Context, optimizer and config stay fixed only within this invocation. Share repeated
+        // sub-searches (including the candidates' common preceding teams), never across calls.
+        val systemFormationCache = mutableMapOf<SystemFormationKey, LabyrinthTeamEvaluation?>()
         val rankings = candidateIds.map { candidateId ->
             val candidate = profiles.getValue(candidateId)
             val pool = acquired + candidate
-            val placement = requireNotNull(bestCandidatePlacementPlan(pool, candidate, context))
+            val placement = requireNotNull(bestCandidatePlacementPlan(pool, candidate, context, systemFormationCache))
             val playerScore = candidate.effectiveUserScore
             val playerWeight = optimizer.scoringConfig.playerWeight
             LabyrinthRoleCandidateRanking(
@@ -1822,13 +1825,14 @@ class LabyrinthRoleChoicePolicy(
         pool: List<LabyrinthRoleProfile>,
         candidate: LabyrinthRoleProfile,
         context: LabyrinthRoleDecisionContext,
+        systemFormationCache: MutableMap<SystemFormationKey, LabyrinthTeamEvaluation?>,
     ): CandidatePlacementPlan? {
         val plans = buildList {
             config.effectiveCandidateTeamWeights().indices.forEach { candidateLayer ->
                 if (pool.distinctBy(LabyrinthRoleProfile::characterId).size - 1 < candidateLayer * TEAM_SIZE) {
                     return@forEach
                 }
-                candidatePlacementPlan(pool, candidate, context, candidateLayer)?.let(::add)
+                candidatePlacementPlan(pool, candidate, context, candidateLayer, systemFormationCache)?.let(::add)
             }
         }
         return plans.maxWithOrNull(
@@ -1842,6 +1846,7 @@ class LabyrinthRoleChoicePolicy(
         candidate: LabyrinthRoleProfile,
         context: LabyrinthRoleDecisionContext,
         candidateLayer: Int,
+        systemFormationCache: MutableMap<SystemFormationKey, LabyrinthTeamEvaluation?>,
     ): CandidatePlacementPlan? {
         var remaining = pool.distinctBy(LabyrinthRoleProfile::characterId)
         val teams = mutableListOf<LabyrinthTeamEvaluation>()
@@ -1865,7 +1870,16 @@ class LabyrinthRoleChoicePolicy(
                     requiredId = null
                 }
             }
-            val team = optimizer.bestSystemFormation(teamPool, context, requiredId) ?: return null
+            // Snapshot the ordered pool, not sorted ids: stable enumeration breaks score ties.
+            val searchKey = SystemFormationKey(teamPool.toList(), requiredId)
+            val team = (if (systemFormationCache.containsKey(searchKey)) {
+                systemFormationCache[searchKey]
+            } else {
+                optimizer.bestSystemFormation(teamPool, context, requiredId).also {
+                    // containsKey above also reuses a cached null (no valid formation).
+                    systemFormationCache[searchKey] = it
+                }
+            }) ?: return null
             teams += team
             val used = team.members.map(LabyrinthRoleProfile::characterId).toSet()
             remaining = remaining.filterNot { it.characterId in used }
@@ -1878,6 +1892,11 @@ class LabyrinthRoleChoicePolicy(
         val systemScore = teams.indices.sumOf { teams[it].systemScore * weights[it] } / weightSum
         return CandidatePlacementPlan(candidateLayer, teams, candidateTeam, systemScore)
     }
+
+    private data class SystemFormationKey(
+        val orderedPool: List<LabyrinthRoleProfile>,
+        val requiredId: String?,
+    )
 
     private data class CandidatePlacementPlan(
         val candidateLayer: Int,
