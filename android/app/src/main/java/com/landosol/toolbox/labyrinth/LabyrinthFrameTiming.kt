@@ -13,4 +13,8 @@ data class LabyrinthFrameTiming(
     val responseIntervalMillis: Long,
     val queue: FrameQueueSnapshot,
     val nodeScanHoldReason: String?,
+    val nodeScanQueryTimestampMillis: Long? = null,
+    val roleRound: LabyrinthRoleRoundDiagnostic? = null,
+    val bossTabAction: LabyrinthBossTabDiagnostic? = null,
+    val discardedRoleDecisionResults: Long = 0L,
 )

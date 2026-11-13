@@ -451,6 +451,23 @@ class LabyrinthDebugDashboardServer(
             put("queueInvalidDropped", timing.queue.invalidDropped)
             put("queueReplaced", timing.queue.replaced)
             put("nodeScanHoldReason", timing.nodeScanHoldReason ?: JSONObject.NULL)
+            put("nodeScanQueryTimestampMillis", timing.nodeScanQueryTimestampMillis ?: JSONObject.NULL)
+            put("nodeScanTimeBasis", if (timing.nodeScanQueryTimestampMillis != null) "captured_frame_timestamp" else JSONObject.NULL)
+            put("discardedRoleDecisionResults", timing.discardedRoleDecisionResults)
+            put("roleRound", timing.roleRound?.let { r -> JSONObject().apply {
+                put("generation", r.generation); put("phase", r.phase)
+                put("selectedId", r.selectedId ?: JSONObject.NULL); put("token", r.token ?: JSONObject.NULL)
+                put("dispatchedAtMillis", r.dispatchedAtMillis ?: JSONObject.NULL)
+                put("feedbackAfterMillis", r.feedbackAfterMillis ?: JSONObject.NULL)
+                put("newRoundEvidenceFrames", r.newRoundEvidenceFrames)
+            } } ?: JSONObject.NULL)
+            put("bossTabAction", timing.bossTabAction?.let { r -> JSONObject().apply {
+                put("sourceIndex", r.sourceIndex); put("expectedIndex", r.expectedIndex)
+                put("phase", r.phase); put("active", r.active)
+                put("dispatchedAtMillis", r.dispatchedAtMillis)
+                put("feedbackAfterMillis", r.feedbackAfterMillis ?: JSONObject.NULL)
+                put("ackFrames", r.ackFrames); put("lastEvidenceAtMillis", r.lastEvidenceAtMillis ?: JSONObject.NULL)
+            } } ?: JSONObject.NULL)
         } } ?: JSONObject.NULL)
         // 路线预览的缓存键：包含当前节点，推进到下一格才会让页面重新取一次。
         put("routePreviewKey", LabyrinthRoutePreviewCache.key() ?: JSONObject.NULL)
