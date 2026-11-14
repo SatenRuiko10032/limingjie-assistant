@@ -92,91 +92,91 @@ fun AccountScreen(
         },
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.TopCenter) {
-        LazyVerticalGrid(
-            columns = GridCells.Adaptive(minSize = 300.dp),
-            modifier = Modifier.widthIn(max = 1080.dp).fillMaxSize(),
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("共 ${state.accounts.size} 个账号", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        text = "选择当前账号后，黎明界会在需要时自动登录。登录凭据加密保存在本机。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    if (state.accounts.isNotEmpty() || query.isNotEmpty()) {
-                        OutlinedTextField(
-                            value = query,
-                            onValueChange = { query = it },
-                            label = { Text("查找账号") },
-                            placeholder = { Text("名称、服务器或游戏 UID") },
-                            singleLine = true,
-                            trailingIcon = {
-                                if (query.isNotEmpty()) {
-                                    TextButton(onClick = { query = "" }) { Text("清除") }
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth(),
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(minSize = 300.dp),
+                modifier = Modifier.widthIn(max = 1080.dp).fillMaxSize(),
+                contentPadding = PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("共 ${state.accounts.size} 个账号", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            text = "选择当前账号后，黎明界会在需要时自动登录。登录凭据加密保存在本机。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        if (state.accounts.isNotEmpty() || query.isNotEmpty()) {
+                            OutlinedTextField(
+                                value = query,
+                                onValueChange = { query = it },
+                                label = { Text("查找账号") },
+                                placeholder = { Text("名称、服务器或游戏 UID") },
+                                singleLine = true,
+                                trailingIcon = {
+                                    if (query.isNotEmpty()) {
+                                        TextButton(onClick = { query = "" }) { Text("清除") }
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                        if (searchTerm.isNotEmpty()) {
+                            Text("找到 ${visibleAccounts.size} 个账号", style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+                state.message?.takeIf {
+                    state.editor == null && state.deleteCandidate == null
+                }?.let { message ->
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        MessageCard(message = message, onDismiss = onDismissMessage)
+                    }
+                }
+                if (state.accounts.isEmpty()) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            Text("还没有账号", style = MaterialTheme.typography.titleMedium)
+                            Text("添加账号后即可配置黎明界任务。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Button(onClick = onAdd, enabled = !state.isWorking) { Text("新增账号") }
+                        }
+                    }
+                } else if (visibleAccounts.isEmpty()) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        Column(
+                            Modifier.fillMaxWidth().padding(vertical = 32.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text("没有找到匹配的账号", style = MaterialTheme.typography.titleMedium)
+                            TextButton(onClick = { query = "" }) { Text("显示全部账号") }
+                        }
+                    }
+                } else {
+                    items(visibleAccounts, key = { it.id }) { account ->
+                        AccountCard(
+                            account = account,
+                            enabled = !state.isWorking,
+                            onEdit = { onEdit(account.id) },
+                            onSelect = { onSelect(account.id) },
+                            onDelete = { onRequestDelete(account) },
                         )
                     }
-                    if (searchTerm.isNotEmpty()) {
-                        Text("找到 ${visibleAccounts.size} 个账号", style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (state.isWorking && state.editor == null && state.deleteCandidate == null) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                            CircularProgressIndicator()
+                        }
                     }
                 }
             }
-            state.message?.takeIf {
-                state.editor == null && state.deleteCandidate == null
-            }?.let { message ->
-                item(span = { GridItemSpan(maxLineSpan) }) {
-                    MessageCard(message = message, onDismiss = onDismissMessage)
-                }
-            }
-            if (state.accounts.isEmpty()) {
-                item(span = { GridItemSpan(maxLineSpan) }) {
-                    Column(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        Text("还没有账号", style = MaterialTheme.typography.titleMedium)
-                        Text("添加账号后即可配置黎明界任务。", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Button(onClick = onAdd, enabled = !state.isWorking) { Text("新增账号") }
-                    }
-                }
-            } else if (visibleAccounts.isEmpty()) {
-                item(span = { GridItemSpan(maxLineSpan) }) {
-                    Column(
-                        Modifier.fillMaxWidth().padding(vertical = 32.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Text("没有找到匹配的账号", style = MaterialTheme.typography.titleMedium)
-                        TextButton(onClick = { query = "" }) { Text("显示全部账号") }
-                    }
-                }
-            } else {
-                items(visibleAccounts, key = { it.id }) { account ->
-                    AccountCard(
-                        account = account,
-                        enabled = !state.isWorking,
-                        onEdit = { onEdit(account.id) },
-                        onSelect = { onSelect(account.id) },
-                        onDelete = { onRequestDelete(account) },
-                    )
-                }
-            }
-            if (state.isWorking && state.editor == null && state.deleteCandidate == null) {
-                item(span = { GridItemSpan(maxLineSpan) }) {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                        CircularProgressIndicator()
-                    }
-                }
-            }
-        }
         }
     }
 
