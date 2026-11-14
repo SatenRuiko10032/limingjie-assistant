@@ -16,6 +16,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
@@ -24,10 +25,11 @@ import androidx.compose.ui.unit.dp
  * a compact viewport instead of scaling the portrait layout up until only one card is visible.
  */
 internal fun isCompactLandscape(widthDp: Int, heightDp: Int): Boolean =
-    widthDp >= 600 && widthDp > heightDp && heightDp < 720
+    shouldUseNavigationRail(widthDp, heightDp) && heightDp < 720
 
+// At 1280x720 / 320 dpi, system bars can reduce the available width below 600 dp.
 internal fun shouldUseNavigationRail(widthDp: Int, heightDp: Int): Boolean =
-    widthDp >= 600 && widthDp > heightDp
+    widthDp >= 480 && widthDp > heightDp
 
 /** Shared page header with room for readable titles and touch targets in emulator windows. */
 @Composable
@@ -38,13 +40,14 @@ internal fun CompactTopBar(
     backEnabled: Boolean = true,
     actions: @Composable () -> Unit = {},
 ) {
+    val compactHeight = LocalConfiguration.current.screenHeightDp < 480
     Surface(modifier = modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surface) {
         Column {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .statusBarsPadding()
-                    .heightIn(min = 56.dp)
+                    .heightIn(min = if (compactHeight) 48.dp else 56.dp)
                     .padding(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,

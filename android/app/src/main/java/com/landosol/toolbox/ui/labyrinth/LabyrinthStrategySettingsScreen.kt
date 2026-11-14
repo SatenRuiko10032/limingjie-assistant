@@ -16,6 +16,7 @@ import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -91,10 +92,15 @@ fun LabyrinthStrategySettingsScreen(
     }
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val wideLayout = maxWidth >= 720.dp
+        val compactHeight = maxHeight < 480.dp
+        val inlineCategory = compactHeight && !wideLayout
         Scaffold(
             modifier = Modifier.fillMaxSize(),
             topBar = {
                 CompactTopBar(title = "策略设置", onBack = close, backEnabled = !saving, actions = {
+                    if (inlineCategory) {
+                        StrategyCategoryPicker(section = section, onSelect = { section = it }, inline = true)
+                    }
                     TextButton(onClick = { confirmReset = true }, enabled = !saving) {
                         Text("恢复默认", style = MaterialTheme.typography.labelLarge)
                     }
@@ -103,7 +109,8 @@ fun LabyrinthStrategySettingsScreen(
             bottomBar = {
                 Surface(tonalElevation = 3.dp) {
                     Row(
-                        Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp),
+                        Modifier.fillMaxWidth().navigationBarsPadding()
+                            .padding(horizontal = 16.dp, vertical = if (compactHeight) 4.dp else 8.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -112,8 +119,10 @@ fun LabyrinthStrategySettingsScreen(
                             Text(error ?: if (saving) "正在保存…" else if (draft == saved) "配置已保存" else "有未保存的修改",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = if (error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
-                            Text("所有账号共用 · 下次启动生效", style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            if (!compactHeight) {
+                                Text("所有账号共用 · 下次启动生效", style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                             message?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                         }
                         Button(onClick = { onSave(draft) }, enabled = draft.canSaveDraft(saved, saving),
@@ -151,7 +160,7 @@ fun LabyrinthStrategySettingsScreen(
                     }
                 }
                 Column(Modifier.weight(1f).fillMaxHeight()) {
-                    if (!wideLayout) {
+                    if (!wideLayout && !inlineCategory) {
                         StrategyCategoryPicker(section = section, onSelect = { section = it })
                     }
                     sectionStateHolder.SaveableStateProvider(section) {
@@ -159,6 +168,10 @@ fun LabyrinthStrategySettingsScreen(
                             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
                             verticalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
+                            if (compactHeight) {
+                                Text("所有账号共用 · 下次启动生效", style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                             when (section) {
                                 "评分" -> StrategyPanel("评分", "玩家评分 ${draft.playerWeight}% · 系统权重自动归一化") {
                                     OutlinedButton(onClick = { showRoleRatings = true }, enabled = !saving,
@@ -556,13 +569,20 @@ private fun StrategyCheckChoice(
 }
 
 @Composable
-private fun StrategyCategoryPicker(section: String, onSelect: (String) -> Unit) {
+private fun StrategyCategoryPicker(section: String, onSelect: (String) -> Unit, inline: Boolean = false) {
     var expanded by remember { mutableStateOf(false) }
-    Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-        OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(section)
-                Text("切换分类 ▾")
+    Box(if (inline) Modifier else Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+        OutlinedButton(
+            onClick = { expanded = true },
+            modifier = (if (inline) Modifier else Modifier.fillMaxWidth()).heightIn(min = 48.dp),
+        ) {
+            if (inline) {
+                Text("$section ▾")
+            } else {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(section)
+                    Text("切换分类 ▾")
+                }
             }
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }, modifier = Modifier.heightIn(max = 360.dp)) {
@@ -578,9 +598,10 @@ private fun StrategyCategoryPicker(section: String, onSelect: (String) -> Unit) 
 
 @Composable
 private fun StrategyPanel(title: String, summary: String, content: @Composable ColumnScope.() -> Unit) {
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    val compactHeight = LocalConfiguration.current.screenHeightDp < 480
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(if (compactHeight) 8.dp else 12.dp)) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(title, style = MaterialTheme.typography.titleLarge)
+            Text(title, style = if (compactHeight) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge)
             Text(summary, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         HorizontalDivider()
