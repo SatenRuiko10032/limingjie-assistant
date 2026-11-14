@@ -21,8 +21,9 @@ enum class LabyrinthCharacterAttribute(val label: String) {
 private val ATTRIBUTE_SLOTS = LabyrinthCharacterAttribute.values()
 private val ATTRIBUTE_SLOT_COUNT = ATTRIBUTE_SLOTS.size
 
-/** Default shard budget; explicitly requesting four shards still uses the same two workers. */
-private const val ROLE_SEARCH_THREADS = 2
+/** Default shard limit follows the actual shared compute workers; this never creates a pool. */
+private val ROLE_SEARCH_THREADS: Int
+    get() = LabyrinthFourThreadRuntime.cpuWorkerBudget
 
 /** Below this many combinations the thread hand-off costs more than it saves. */
 private const val PARALLEL_MIN_COMBINATIONS = 512
@@ -1228,12 +1229,12 @@ internal fun List<LabyrinthRoleProfile>.hasEligibleVanguardAtActualFront(
 class LabyrinthTeamOptimizer(
     private val scorer: LabyrinthTeamScorer,
     /**
-     * Worker threads for the combination walk. Deliberately not tied to the CPU count: the game
-     * and this app share one virtual machine, and saturating every core makes the game drop
-     * frames, which lengthens the run more than the search it was meant to speed up. Set to 1 to
-     * force the serial path.
+     * Maximum combination shards, defaulting to the shared runtime's actual worker budget.
+     * Set to 1 for the serial path; explicit shard counts do not create additional threads.
      */
     private val searchThreads: Int = ROLE_SEARCH_THREADS,
+    /** Production keeps the old shared alias; tests may inject the executor owning their root. */
+    private val searchExecutor: ExecutorService = ROLE_SEARCH_EXECUTOR,
 ) {
     val scoringConfig: LabyrinthTeamScoringConfig
         get() = scorer.config
@@ -1541,15 +1542,18 @@ class LabyrinthTeamOptimizer(
         // Reuse the existing bounded shape-only cache. No role identity is retained by it.
         val flat = LabyrinthCombinationIndexCache.shared.get(combinationPool.size, combinationSize, comboCount)
         val chunkCount = minOf(searchThreads, comboCount)
-        val chunkSize = (comboCount + chunkCount - 1) / chunkCount
+        // Contiguous quotient/remainder ranges cover every original index exactly once. Unlike
+        // ceil-sized chunks, they have no empty tail and differ in length by at most one.
+        val baseChunkSize = comboCount / chunkCount
+        val extraChunks = comboCount % chunkCount
         val tasks = (0 until chunkCount).map { chunk ->
+            val from = chunk * baseChunkSize + minOf(chunk, extraChunks)
+            val until = from + baseChunkSize + if (chunk < extraChunks) 1 else 0
             val counts = shardCounts?.let { LabyrinthSearchWorkCounts().also(it::add) }
             Callable {
                 val best = PriorityQueue(order)
                 val team = ArrayList<LabyrinthRoleProfile>(combinationSize + if (requiredIndex >= 0) 1 else 0)
                 val scratch = filter.numeric.newScratch()
-                val from = chunk * chunkSize
-                val until = minOf(comboCount, from + chunkSize)
                 for (index in from until until) {
                     if ((index and 31) == 0) LabyrinthFourThreadRuntime.cooperate()
                     team.clear()
@@ -1572,7 +1576,7 @@ class LabyrinthTeamOptimizer(
                 best.toList()
             }
         }
-        val partials = ROLE_SEARCH_EXECUTOR.invokeAll(tasks).map { it.get() }
+        val partials = searchExecutor.invokeAll(tasks).map { it.get() }
         val merged = ArrayList<RankedCandidate>(partials.sumOf { it.size })
         partials.forEach(merged::addAll)
         merged.sortWith(order.reversed())
