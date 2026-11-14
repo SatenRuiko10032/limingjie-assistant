@@ -188,6 +188,17 @@ internal fun labyrinthPersistedBossNode(route: LabyrinthRouteJson?): LabyrinthNo
     }
 }
 
+/** The active battle can remain on an area Boss after the saved cursor advances to the next START. */
+internal fun labyrinthBattleTeamArea(
+    activeNodeArea: Int?,
+    combatKind: LabyrinthCombatKind?,
+    route: LabyrinthRouteJson?,
+    progressArea: Int?,
+): Int? = activeNodeArea
+    ?: (if (combatKind == LabyrinthCombatKind.BOSS) labyrinthPersistedBossNode(route)?.area else null)
+    ?: labyrinthPersistedCurrentNode(route)?.area
+    ?: progressArea
+
 internal fun labyrinthBossEncounterStrategy(route: LabyrinthRouteJson?): LabyrinthExEncounterStrategy? {
     val boss = labyrinthPersistedBossNode(route) ?: return null
     val unitId = LabyrinthBossCatalog.unitIdForQuest(boss.area, boss.questId)
@@ -4415,6 +4426,9 @@ class LabyrinthEntryRecognitionSession(
 
         val current = _state.value
         val currentCombatContext = combatContext
+        val battleArea = labyrinthBattleTeamArea(
+            activeNodeArea, currentCombatContext?.kind, validatedRoute, current.routeProgress?.currentArea,
+        )
         val encounterStrategy = when (currentCombatContext?.kind) {
             LabyrinthCombatKind.EX -> currentExEncounterStrategy
             LabyrinthCombatKind.BOSS -> labyrinthBossEncounterStrategy(validatedRoute)
@@ -4446,6 +4460,8 @@ class LabyrinthEntryRecognitionSession(
             .distinct()
         val cacheKey = buildString {
             append(acquiredCharacterIds.sorted().joinToString(","))
+            append("|area=")
+            append(battleArea)
             append("|defense=")
             append(defenseStacks)
             append("|targets=")
@@ -4506,6 +4522,7 @@ class LabyrinthEntryRecognitionSession(
             preferSingleDamageSystem = preferCohesiveDamageSystem, encounterStrategy = encounterStrategy,
             effectiveCharacterIds = synchronized(effectiveExCharacterIds) { effectiveExCharacterIds.toSet() },
             relaxedVanguardGate = currentCombatContext?.kind == LabyrinthCombatKind.BOSS && bossFallbackMultiTeamActive,
+            currentArea = battleArea,
         )
         val allowSupplementLead = currentCombatContext?.kind == LabyrinthCombatKind.BOSS &&
             bossTeamMode == LabyrinthBossTeamMode.MULTI_TEAM && currentCombatContext.teamIndex > 1
