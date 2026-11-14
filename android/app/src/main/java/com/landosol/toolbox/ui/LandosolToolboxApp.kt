@@ -280,7 +280,7 @@ fun LandosolToolboxApp() {
                 NavigationRail(
                     modifier = Modifier.fillMaxHeight().width(88.dp),
                     containerColor = MaterialTheme.colorScheme.surface,
-                    header = if (configuration.screenHeightDp < 480) null else ({
+                    header = {
                         Surface(
                             Modifier.padding(vertical = 12.dp).size(38.dp),
                             shape = MaterialTheme.shapes.medium,
@@ -290,7 +290,7 @@ fun LandosolToolboxApp() {
                                 Text("黎", style = MaterialTheme.typography.titleMedium)
                             }
                         }
-                    }),
+                    },
                 ) {
                     Column(
                         modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()),
