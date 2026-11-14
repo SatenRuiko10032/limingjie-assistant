@@ -1,6 +1,10 @@
 package com.landosol.toolbox.ui
 
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
@@ -288,18 +292,24 @@ fun LandosolToolboxApp() {
                         }
                     },
                 ) {
-                    topLevelDestinations.forEach { destination ->
-                        NavigationRailItem(
-                            selected = screen == destination.screen,
-                            onClick = { requestNavigation(destination.screen) },
-                            icon = {
-                                Icon(destination.icon, contentDescription = null)
-                            },
-                            label = {
-                                Text(destination.label, style = MaterialTheme.typography.labelMedium)
-                            },
-                            alwaysShowLabel = true,
-                        )
+                    Column(
+                        modifier = Modifier.weight(1f).verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        topLevelDestinations.forEach { destination ->
+                            NavigationRailItem(
+                                selected = screen == destination.screen,
+                                onClick = { requestNavigation(destination.screen) },
+                                icon = {
+                                    Icon(destination.icon, contentDescription = null)
+                                },
+                                label = {
+                                    Text(destination.label, style = MaterialTheme.typography.labelMedium)
+                                },
+                                alwaysShowLabel = true,
+                            )
+                        }
                     }
                 }
                 VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)

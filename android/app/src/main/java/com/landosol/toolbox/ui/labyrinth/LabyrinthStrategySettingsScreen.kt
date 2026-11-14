@@ -150,13 +150,13 @@ fun LabyrinthStrategySettingsScreen(
                         }
                     }
                 }
-                Column(Modifier.weight(1f).fillMaxHeight()) {
-                    if (!wideLayout) {
-                        StrategyCategoryPicker(section = section, onSelect = { section = it })
-                    }
-                    sectionStateHolder.SaveableStateProvider(section) {
+                sectionStateHolder.SaveableStateProvider(section) {
+                    Column(Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState())) {
+                        if (!wideLayout) {
+                            StrategyCategoryPicker(section = section, onSelect = { section = it })
+                        }
                         Column(
-                            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+                            Modifier.fillMaxWidth().padding(16.dp),
                             verticalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
                             when (section) {
