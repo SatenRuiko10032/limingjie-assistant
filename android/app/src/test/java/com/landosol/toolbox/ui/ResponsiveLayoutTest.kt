@@ -70,8 +70,9 @@ class ResponsiveLayoutTest {
         assertTrue(screen.contains("draft.canSaveDraft(saved, saving)"))
         assertTrue(screen.contains("EventCustomizationEditor("))
         assertTrue(screen.contains("draft = LabyrinthStrategySettings()"))
-        assertTrue(screen.contains("全局配置 · 所有账号共用"))
-        assertTrue(screen.contains("CompactTopBar(title = \"策略设置\", actions"))
+        assertTrue(screen.contains("所有账号共用 · 下次启动生效"))
+        assertTrue(Regex("""CompactTopBar\(\s*title\s*=\s*"策略设置",[^)]*\bactions\s*=""")
+            .containsMatchIn(screen))
     }
 
     @Test

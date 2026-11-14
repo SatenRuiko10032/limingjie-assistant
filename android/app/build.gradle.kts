@@ -91,6 +91,10 @@ android {
         getByName("androidTest").assets.srcDir("$projectDir/schemas")
         getByName("test").resources.srcDir("$rootDir/test-fixtures/protocol")
     }
+
+    testOptions.unitTests.all {
+        it.systemProperty("test.coexistSuffix", project.findProperty("coexistSuffix") ?: "")
+    }
 }
 
 ksp {
