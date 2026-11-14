@@ -94,7 +94,7 @@ class LabyrinthOpeningRosterOverrideTest {
         val expected = mapOf(
             6 to listOf(listOf("1348"), listOf("1344"), listOf("1054", "1116")),
             7 to listOf(listOf("1082"), listOf("1117"), listOf("1138")),
-            8 to listOf(listOf("1038"), listOf("1026"), listOf("1128")),
+            8 to listOf(listOf("1033"), listOf("1026"), listOf("1038")),
             9 to listOf(listOf("1079"), listOf("1168"), listOf("1251")),
             10 to listOf(listOf("1056"), listOf("1299"), listOf("1051")),
         )

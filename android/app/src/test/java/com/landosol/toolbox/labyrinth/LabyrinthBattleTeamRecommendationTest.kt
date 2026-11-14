@@ -124,12 +124,17 @@ class LabyrinthBattleTeamRecommendationTest {
             LabyrinthRoleDecisionContext(defenseMarkStacks = 4)) as LabyrinthBattleTeamRecommendationResult.Ready
         assertEquals("T", decision.recommendation.vanguard.characterId)
         assertEquals(2, decision.recommendation.members.size)
+        assertEquals(1, decision.recommendation.safeBossTeamCount)
         assertEquals(null, tank.physicalDamagePotential)
         val unknownPosition = profiles + ("rear" to rear.copy(position = null))
-        val blocked = recommendationPlanner(unknownPosition).initialRecommendation(unknownPosition.keys,
-            LabyrinthRoleDecisionContext(defenseMarkStacks = 4)) as LabyrinthBattleTeamRecommendationResult.Unavailable
-        assertTrue(blocked.reason.contains("一号位"))
-        assertTrue(blocked.reason.contains("站位"))
+        // Small opening rosters use the existing supplement fallback when safe positioning
+        // cannot be established; they must not be labelled as a safe tank-led team.
+        val fallback = recommendationPlanner(unknownPosition).initialRecommendation(unknownPosition.keys,
+            LabyrinthRoleDecisionContext(defenseMarkStacks = 4)) as LabyrinthBattleTeamRecommendationResult.Ready
+        assertEquals(profiles.keys, fallback.recommendation.members.map { it.characterId }.toSet())
+        assertEquals(0, fallback.recommendation.safeBossTeamCount)
+        assertTrue(fallback.recommendation.reasons.any { it.contains("资料不完整") })
+        assertEquals(null, unknownPosition.getValue("rear").position)
     }
 
     @Test fun `one missing profile does not block a known five member T team`() {
