@@ -271,8 +271,17 @@ class LabyrinthNodeClassifier(
     /** Candidate windows scored by [classifyNode] during the most recent [classifyMapNodes]. */
     var lastSearchWindowCount: Int = 0
         private set
+    /** Independent current-frame crop checks when search geometry is reused. */
+    var lastRevalidationCount: Int = 0
+        private set
+    var lastEvidenceSource: NodeFrameEvidenceSource = NodeFrameEvidenceSource.NONE
+        private set
 
     fun resetTracking() {
+        scanMemo = null
+        scanMemoFrames = 0
+        lastRevalidationCount = 0
+        lastEvidenceSource = NodeFrameEvidenceSource.NONE
         previousFrame = null
         previousTemplates = null
         previousNodes = emptyList()
@@ -357,13 +366,13 @@ class LabyrinthNodeClassifier(
             }
             colorScore == null || colorScore >= minimumColorScore
         }
-        val strongestStructuralActive = gatedScores
-            .filterKeys { templateId ->
-                blockTypeForTemplate(templateId)?.let { blockType ->
-                    isNodeTemplateClickable(templateId, blockType)
-                } == true
-            }
-            .maxByOrNull { it.value }
+        // Keep the original entry order and maxByOrNull's Double.compareTo tie/NaN semantics,
+        // without constructing a filtered map for every candidate window.
+        val strongestStructuralActive = gatedScores.strongestNodeEntryMatching { templateId ->
+            blockTypeForTemplate(templateId)?.let { blockType ->
+                isNodeTemplateClickable(templateId, blockType)
+            } == true
+        }
         val activeColorEvidence = activeNodeColorEvidence(frame, iconRect)
         val activeTypeEvidence = activeColorEvidence?.let(::inferActiveNodeType)
         if (hasActiveGlow && strongestStructuralActive != null) {
@@ -497,16 +506,14 @@ class LabyrinthNodeClassifier(
             }
         }
         val strongest = gatedScores.maxByOrNull { it.value } ?: return null
-        val strongestActive = gatedScores
-            .filterKeys { templateId ->
-                blockTypeForTemplate(templateId)?.let { type ->
-                    isNodeTemplateClickable(templateId, type)
-                } == true
-            }
-            .maxByOrNull { it.value }
-        val strongestNonExplicitActive = gatedScores
-            .filterKeys { templateId -> !isExplicitActiveNodeTemplate(templateId) }
-            .maxByOrNull { it.value }
+        val strongestActive = gatedScores.strongestNodeEntryMatching { templateId ->
+            blockTypeForTemplate(templateId)?.let { type ->
+                isNodeTemplateClickable(templateId, type)
+            } == true
+        }
+        val strongestNonExplicitActive = gatedScores.strongestNodeEntryMatching { templateId ->
+            !isExplicitActiveNodeTemplate(templateId)
+        }
         // Animated backgrounds can make an inactive crop score a few thousandths higher than
         // the active crop of the same node. Prefer the active interpretation only for close ties
         // and only when the crop contains the activation frame. A nominally active match without
@@ -594,6 +601,10 @@ class LabyrinthNodeClassifier(
         templates: NodeTemplateSet,
         searchHint: NodeSearchHint? = null,
     ): List<NodeClassification> {
+        com.landosol.toolbox.labyrinth.concurrent.LabyrinthFourThreadRuntime.cooperate()
+        lastEvidenceSource = NodeFrameEvidenceSource.NONE
+        lastRevalidationCount = 0
+        lastSearchWindowCount = 0
         if (templates.templates.isEmpty()) return emptyList()
         if (searchHint?.targetBlockId != hintedTargetBlockId) {
             hintedTargetBlockId = searchHint?.targetBlockId
@@ -638,6 +649,7 @@ class LabyrinthNodeClassifier(
         ) {
             val refreshed = previousNodes.mapNotNull { node ->
                 val rect = node.screenRect ?: return@mapNotNull null
+                lastRevalidationCount++
                 classifyNode(frame, rect, templates)?.copy(column = node.column, row = node.row)
             }
             lastSearchWindowCount = refreshed.size
@@ -645,16 +657,16 @@ class LabyrinthNodeClassifier(
                     now.blockType == old.blockType && now.isClickable == old.isClickable
                 }) {
                 lastSearchMode = "tracked"
+                lastEvidenceSource = NodeFrameEvidenceSource.TRACKED
                 trackedFrames++
                 previousNodes = refreshed
                 return refreshed
             }
         }
-        // Nothing about this scan depends on wall-clock time: same frame, same templates, same
-        // hint and same rung means the same detections. During a stall the map is static and the
-        // run pays for an identical answer every frame. Serve it from the last real scan instead,
-        // and let any real change in the viewport — including the activation glow's own pulse,
-        // which is what usually ends such a stall — invalidate it.
+        // Reuse only the expensive search geometry. The sampled viewport signature is not
+        // proof that each node is still visible/active: an unchanged memo must never manufacture
+        // three independent stable observations. Reclassify its crops against THIS frame before
+        // returning actionable evidence, without repeating the full candidate search.
         val memo = scanMemo
         if (
             memo != null &&
@@ -664,11 +676,21 @@ class LabyrinthNodeClassifier(
             scanMemoFrames < MAX_SCAN_MEMO_FRAMES &&
             isStableViewport(memo.signature, frame)
         ) {
-            scanMemoFrames++
-            lastSearchMode = searchMode.label
-            lastSearchWindowCount = 0
-            updateHintMissState(searchHint, searchMode)
-            return memo.result
+            val refreshed = revalidateMemoCrops(frame, memo.result, templates)
+            if (refreshed.size == memo.result.size && refreshed.zip(memo.result).all { (now, old) ->
+                    now.blockType == old.blockType && now.isClickable == old.isClickable
+                }) {
+                scanMemoFrames++
+                lastSearchMode = searchMode.label
+                lastSearchWindowCount = 0
+                lastEvidenceSource = if (refreshed.isEmpty()) NodeFrameEvidenceSource.NONE
+                    else NodeFrameEvidenceSource.MEMO_REVALIDATED
+                updateHintMissState(searchHint, searchMode)
+                return refreshed
+            }
+            // Lost/changed evidence cannot retain the old active crop. Use the existing search
+            // ladder to locate current candidates; do not alter route or retry policy here.
+            scanMemo = null
         }
         scanMemoFrames = 0
         lastSearchMode = searchMode.label
@@ -827,6 +849,7 @@ class LabyrinthNodeClassifier(
             previousNodes = result
             scanMemo = ScanMemo(signature, searchMode, searchHint, templates, result)
             lastSearchWindowCount = scoredWindows
+            lastEvidenceSource = NodeFrameEvidenceSource.SEARCH
             return result
         } finally {
             matcher.clearPreparedFrame()
@@ -835,16 +858,41 @@ class LabyrinthNodeClassifier(
         }
     }
 
+    private fun revalidateMemoCrops(
+        frame: PixelImage, nodes: List<NodeClassification>, templates: NodeTemplateSet,
+    ): List<NodeClassification> {
+        if (nodes.isEmpty()) return emptyList()
+        val borrowed = sharedFrameFeatures?.takeIf { it.hasPreparedFrame(frame) }
+        return try {
+            if (borrowed != null) matcher.sharePreparedFrame(borrowed) else matcher.prepareFrame(frame)
+            nodes.mapNotNull { node ->
+                val rect = node.screenRect ?: return@mapNotNull null
+                com.landosol.toolbox.labyrinth.concurrent.LabyrinthFourThreadRuntime.cooperate()
+                lastRevalidationCount++
+                classifyNode(frame, rect, templates)?.copy(column = node.column, row = node.row)
+            }
+        } finally {
+            matcher.clearPreparedFrame()
+        }
+    }
+
     // Retain only the pixels used by the stability check, not an entire 1080p capture (~8 MiB).
     private fun viewportSignature(frame: PixelImage): ViewportSignature {
         val step = maxOf(8, frame.height / 45)
-        val colors = ArrayList<Int>()
-        for (y in frame.height / 7 until frame.height * 6 / 7 step step) {
-            for (x in frame.width / 5 until frame.width * 19 / 20 step step) {
-                colors.add(frame[x, y])
+        val rows = frame.height / 7 until frame.height * 6 / 7 step step
+        val columns = frame.width / 5 until frame.width * 19 / 20 step step
+        val rowCount = if (rows.isEmpty()) 0 else (rows.last - rows.first) / step + 1
+        val columnCount = if (columns.isEmpty()) 0 else (columns.last - columns.first) / step + 1
+        // The signature outlives this scan. Keep its own primitive array, but avoid boxing every
+        // sampled color into an ArrayList and copying it again with toIntArray().
+        val colors = IntArray(rowCount * columnCount)
+        var index = 0
+        for (y in rows) {
+            for (x in columns) {
+                colors[index++] = frame[x, y]
             }
         }
-        return ViewportSignature(frame.width, frame.height, colors.toIntArray())
+        return ViewportSignature(frame.width, frame.height, colors)
     }
 
     /** Pixel-only viewport identity; remains available even when no node can be classified. */
@@ -1319,6 +1367,19 @@ internal fun isRegularNodeTemplate(templateId: String): Boolean =
  * crop has a center near x=400. A 22% cutoff discarded that legitimate column before semantic
  * validation; keep only the truly overlay-dominated strip excluded.
  */
+/** Same first maximum as filterKeys(predicate).maxByOrNull { it.value }, with no filtered map. */
+internal inline fun Map<String, Double>.strongestNodeEntryMatching(
+    predicate: (String) -> Boolean,
+): Map.Entry<String, Double>? {
+    var best: Map.Entry<String, Double>? = null
+    for (entry in entries) {
+        if (!predicate(entry.key)) continue
+        val previous = best
+        if (previous == null || entry.value.compareTo(previous.value) > 0) best = entry
+    }
+    return best
+}
+
 /** Lets the per-frame classification memo store a real null result instead of recomputing it. */
 private class Optional(val value: NodeClassification?)
 

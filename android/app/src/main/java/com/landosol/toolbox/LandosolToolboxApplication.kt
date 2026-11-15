@@ -79,9 +79,13 @@ class LandosolToolboxApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // Freeze the Android-visible CPU choice once, before any business executor is initialized.
+        val threadBudget = com.landosol.toolbox.labyrinth.concurrent.LabyrinthThreadBudget.process
         // First line of every process log, so a diagnostic bundle always names the build it came
         // from even when the interesting part of the run happened much later.
         Log.i(APP_LOG_TAG, "黎明界助手启动：${AppVersion.display}")
+        Log.i(APP_LOG_TAG, "线程启动预算：Android可见CPU=${threadBudget.availableProcessors}，" +
+            "采集=1，控制=1，重计算=${threadBudget.cpuWorkerBudget}，业务预算=${threadBudget.businessThreadBudget}")
         logGameClient()
         // 只有登录时会临时转竖屏的渠道才容忍旋转；其他服务器保持上游「尺寸一变就停止捕获」。
         com.landosol.toolbox.automation.capture.CaptureRotationPolicy.toleratesTransientRotation = {
@@ -267,19 +271,49 @@ class LandosolToolboxApplication : Application() {
                 AndroidLabyrinthEntryFrameProcessor.create(
                     context = this,
                     characterAttributes = characterAttributes,
-                    finalBossOnly = finalBossOnly,
-                    skipJoinedCharacters = { labyrinthEntryRecognitionSession.skipRoleRewardJoinedRecognition },
-                    relicEvidenceVersion = { labyrinthEntryRecognitionSession.relicEvidenceVersion },
-                    relicVerificationMarks = { labyrinthEntryRecognitionSession.relicVerificationMarks },
-                    nodeSearchHint = { labyrinthEntryRecognitionSession.currentNodeSearchHint() },
+                    finalBossOnly = {
+                        val snapshot = com.landosol.toolbox.labyrinth.LabyrinthBalancedVisionContext.current()
+                        if (snapshot != null) snapshot.finalBossOnly else finalBossOnly()
+                    },
+                    skipJoinedCharacters = {
+                        val snapshot = com.landosol.toolbox.labyrinth.LabyrinthBalancedVisionContext.current()
+                        if (snapshot != null) snapshot.skipJoinedCharacters else labyrinthEntryRecognitionSession.skipRoleRewardJoinedRecognition
+                    },
+                    relicEvidenceVersion = {
+                        val snapshot = com.landosol.toolbox.labyrinth.LabyrinthBalancedVisionContext.current()
+                        if (snapshot != null) snapshot.relicEvidenceVersion else labyrinthEntryRecognitionSession.relicEvidenceVersion
+                    },
+                    relicVerificationMarks = {
+                        val snapshot = com.landosol.toolbox.labyrinth.LabyrinthBalancedVisionContext.current()
+                        if (snapshot != null) snapshot.relicVerificationMarks else labyrinthEntryRecognitionSession.relicVerificationMarks
+                    },
+                    nodeSearchHint = {
+                        val snapshot = com.landosol.toolbox.labyrinth.LabyrinthBalancedVisionContext.current()
+                        if (snapshot != null) snapshot.nodeSearchHint else labyrinthEntryRecognitionSession.currentNodeSearchHint()
+                    },
                     nodeScanRequested = { labyrinthEntryRecognitionSession.nodeScanRequested() },
                     nodeScanConsumable = { labyrinthEntryRecognitionSession.nodeScanConsumable() },
-                    rosterCharacterIds = { labyrinthEntryRecognitionSession.rosterCharacterIds() },
+                    rosterCharacterIds = {
+                        val snapshot = com.landosol.toolbox.labyrinth.LabyrinthBalancedVisionContext.current()
+                        if (snapshot != null) snapshot.rosterCharacterIds else labyrinthEntryRecognitionSession.rosterCharacterIds()
+                    },
                     captureFrameSize = CaptureStateRegistry::captureSize,
                     eventChoiceOverrides = labyrinthEntryRecognitionSession.eventChoiceOverridesSnapshot,
                     eventCustomizationEnabled = labyrinthEntryRecognitionSession.eventCustomizationEnabledSnapshot,
-                    allowInitial1088GeometryRefinement = { labyrinthEntryRecognitionSession.allowInitial1088GeometryRefinement() },
+                    allowInitial1088GeometryRefinement = {
+                        val snapshot = com.landosol.toolbox.labyrinth.LabyrinthBalancedVisionContext.current()
+                        if (snapshot != null) snapshot.allowInitial1088GeometryRefinement else labyrinthEntryRecognitionSession.allowInitial1088GeometryRefinement()
+                    },
                 )::process
+            },
+            fastProcessorFactory = {
+                val observer = com.landosol.toolbox.labyrinth.vision.AndroidLabyrinthFastFrameObserver.create(
+                    this, CaptureStateRegistry::captureSize,
+                )
+                observer::process
+            },
+            fastFramePublisher = debugDashboard?.let { dashboard ->
+                { fast, state -> dashboard.publishFast(fast, state) }
             },
             captureStop = { MediaProjectionCaptureService.stop(this) },
             overlayCoordinator = automationOverlayCoordinator,

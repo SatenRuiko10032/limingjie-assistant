@@ -267,7 +267,9 @@ class LabyrinthNodeSession(
                     "expected=${LabyrinthNodeTypes.labelOf(conflict.expectedBlockType)} " +
                     "detected=${LabyrinthNodeTypes.labelOf(conflict.detectedBlockType)} " +
                     "visual=${conflict.visualColumn}/${conflict.visualRow} " +
-                    "confidence=${"%.3f".format(conflict.confidence)} " +
+                    "bindingOrClassificationConfidence=${"%.3f".format(conflict.confidence)} " +
+                    "visualConfidence=${conflict.visualConfidence?.let { "%.3f".format(it) } ?: "n/a"} " +
+                    "topologyConfidence=${conflict.topologyConfidence?.let { "%.3f".format(it) } ?: "n/a"} " +
                     "sourceClickable=${conflict.sourceClickable} " +
                     "rect=${conflict.screenRect}",
             )

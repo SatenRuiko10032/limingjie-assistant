@@ -47,12 +47,12 @@ class AndroidLabyrinthRelicRewardResolver(
         var complete = layout.complete
         val relics = layout.rows.mapNotNull { row ->
             if (row.hasDetailButton) return@mapNotNull row.match
-            // An imprint may share a relic's colours, so a row without a detail button
-            // is classified by its own name text.
+            // Coins and imprints can share a relic's colours, so a row without a
+            // detail button is classified by its own confirmed name text.
             val name = ocr.read(bitmap, "reward-name:${row.match.slotId}", row.nameRect, scale = 2,
                 capturedAtMillis = capturedAtMillis)
             if (name != null && name.confirmations >= 2 && !name.text.isNullOrBlank()) {
-                if (LabyrinthRelicRewardText.imprint(name.text)) null else row.match
+                if (LabyrinthRelicRewardText.nonRelic(name.text)) null else row.match
             } else {
                 complete = false
                 row.match.copy(relicId = null, displayName = null, attribute = null, attributeBonus = null)
@@ -64,7 +64,7 @@ class AndroidLabyrinthRelicRewardResolver(
 
     private fun hold(result: LabyrinthEntryFrameResult, receipt: LabyrinthRelicRewardObservation) = result.copy(
         observation = result.observation.copy(state = LabyrinthEntryPageState.ITEM_REWARD,
-            reason = if (receipt.titleConfirmed) "奖励遗物待确认" else "正在确认奖励标题"),
+            reason = if (receipt.titleConfirmed) "奖励结果弹窗" else "正在确认奖励标题"),
         relicRewardObservation = receipt,
         nodeClassifications = emptyList(), nodeMoveConfirmation = null,
         relicDetailObservation = null, nodeRelicStackObservation = null,

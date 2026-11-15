@@ -16,6 +16,7 @@ data class LabyrinthRelicRewardObservation(
 )
 
 internal object LabyrinthRelicRewardText {
+    private val coinReward = Regex("阿尔法金币(?:[×xX]?[0-9]+)?")
     private fun normalized(text: String?) = text?.filterNot(Char::isWhitespace)
     fun kind(text: String?): LabyrinthRelicRewardKind? = when (normalized(text)) {
         "迷宫遗物效果" -> LabyrinthRelicRewardKind.RELIC_EFFECT
@@ -23,8 +24,8 @@ internal object LabyrinthRelicRewardText {
     }
     fun ordinaryTitle(text: String?): Boolean = normalized(text) == "获得道具"
     fun seriesTitle(text: String?): Boolean = normalized(text) == "系列效果一览"
-    fun imprint(text: String?): Boolean = normalized(text)?.let {
-        "选择印记" in it || "随机印记" in it
+    fun nonRelic(text: String?): Boolean = normalized(text)?.let {
+        "选择印记" in it || "随机印记" in it || coinReward.matches(it)
     } == true
 }
 
