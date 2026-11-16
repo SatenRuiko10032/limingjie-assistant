@@ -286,10 +286,11 @@ fun LabyrinthStrategySettingsScreen(
                                         onChange = { draft = draft.copy(relicMarkPriority = it) },
                                     )
                                 }
-                                "商店" -> StrategyPanel("商店", if (draft.buyRelics) "购买遗物 · ${if (draft.refreshShop) "区域 ${draft.refreshFromArea} 起刷新" else "不刷新"}" else "不购买") {
-                                    Text("遗物始终优先；达到允许刷新起始区域后，本轮遗物买完或当前商品行已无可购买遗物且刷新可用时，继续花300金币刷新。只有遗物/刷新都无法继续时，才用剩余金币购买已确认的职能印记。无法确认的商品不会盲买。")
-                                    StrategySwitch("购买遗物", "关闭后退出商店，也不会刷新。", draft.buyRelics, !saving) { draft = draft.copy(buyRelics = it) }
-                                    StrategySwitch("允许商店刷新", "买完当前可确认遗物后，才考虑花费 300 金币刷新。", draft.refreshShop, !saving && draft.buyRelics) { draft = draft.copy(refreshShop = it) }
+                                "商店" -> StrategyPanel("商店", if (draft.buyRelics) "购买商品 · ${if (draft.refreshShop) "区域 ${draft.refreshFromArea} 起刷新" else "不刷新"}" else "不购买") {
+                                    Text("1、2图保留原策略。3、5图当前安全可买项按1星遗物→随机印记→2星遗物；首排充分确认无可买后才有限下探，停稳重识别并确认回顶后再刷新或退出。金币与售价按当前画面确认，不猜金额。")
+                                    Text("3图入店金币＞14000才开启本店2星资格；角色商品保留300/600刷新储备并最多成功刷新2次。4图入店＞10000才购买角色印记，当前金币＜8000停止，不买遗物、不刷新。5图保留原刷新循环；仅刷新按钮确认不可用时按1星→随机→2星→全体选择→3星→职能选择收尾，4星不买。")
+                                    StrategySwitch("商店购买", "同时控制遗物和角色印记；关闭后退出商店，也不会刷新。", draft.buyRelics, !saving) { draft = draft.copy(buyRelics = it) }
+                                    StrategySwitch("允许商店刷新", "尊重起始区域；完成货架观察与回顶后，按实际按钮售价判断刷新。关闭不会解锁额外清仓。", draft.refreshShop, !saving && draft.buyRelics) { draft = draft.copy(refreshShop = it) }
                                     if (draft.buyRelics && draft.refreshShop) {
                                         StrategyNumber("允许刷新起始区域", draft.refreshFromArea, 1..5, "", !saving) { draft = draft.copy(refreshFromArea = it) }
                                         if (draft.refreshFromArea < 5) Text("提前刷新会消耗后续商店的金币，请谨慎调整。", color = MaterialTheme.colorScheme.error)

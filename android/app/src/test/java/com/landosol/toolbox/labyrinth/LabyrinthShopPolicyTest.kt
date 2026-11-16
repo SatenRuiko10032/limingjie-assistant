@@ -6,6 +6,7 @@ import com.landosol.toolbox.labyrinth.vision.LabyrinthShopItemKind
 import com.landosol.toolbox.labyrinth.vision.LabyrinthShopItemMatch
 import com.landosol.toolbox.labyrinth.vision.LabyrinthShopItemStatus
 import com.landosol.toolbox.labyrinth.vision.LabyrinthShopCategoryState
+import com.landosol.toolbox.labyrinth.vision.LabyrinthShopImprintForm
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -15,17 +16,32 @@ class LabyrinthShopPolicyTest {
 
     @Test fun `purchase switch closes even with available relic and refresh`() {
         val decision = LabyrinthShopPolicy(buyRelics = false).decide(5,
-            listOf(item("r1", "会心", 1, true)), emptyList(), refreshAvailable = true)
+            listOf(item("r1", "会心", 1, true)), emptyList(), refreshAvailable = true,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
+        )
         assertTrue(decision is LabyrinthShopDecision.Close)
     }
 
     @Test fun `refresh preference supports disabling or starting earlier`() {
         assertTrue(LabyrinthShopPolicy(refreshEnabled = false).decide(5, emptyList(), emptyList(),
-            refreshAvailable = true) is LabyrinthShopDecision.Close)
+            refreshAvailable = true,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
+        ) is LabyrinthShopDecision.Close)
         val policy = LabyrinthShopPolicy(finalArea = 3)
         assertTrue(policy.decide(2, emptyList(), emptyList(), refreshAvailable = true) is LabyrinthShopDecision.Close)
         assertTrue(policy.decide(3, emptyList(), emptyList(), refreshAvailable = true,
-            relicPurchasesInCycle = 3) is LabyrinthShopDecision.Refresh)
+            relicPurchasesInCycle = 3,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
+        ) is LabyrinthShopDecision.Refresh)
         assertTrue(policy.decide(null, emptyList(), emptyList(), refreshAvailable = true) is LabyrinthShopDecision.Close)
     }
 
@@ -34,7 +50,12 @@ class LabyrinthShopPolicyTest {
             LabyrinthRelicMark.DEFENSE to 3)
         val items = listOf(item("defense", "守备", 1, true), item("speed", "加速", 1, true))
         fun choose(end: Int) = (LabyrinthShopPolicy(LabyrinthStrategySettings(baselineLastArea = end).relicPolicy())
-            .decide(3, items, emptyList(), stacks, false) as LabyrinthShopDecision.BuyRelic).relicDecision.choice.relicId
+            .decide(3, items, emptyList(), stacks, false,
+                entryBalance = 20_000,
+                currentBalance = 20_000,
+                shelfScanComplete = true,
+                visibleShelfComplete = true,
+            ) as LabyrinthShopDecision.BuyRelic).relicDecision.choice.relicId
         assertEquals("defense", choose(3))
         assertEquals("speed", choose(2))
     }
@@ -47,32 +68,44 @@ class LabyrinthShopPolicyTest {
             items = listOf(item("r1", "会心", 1, recognized = true)),
             acquired = emptyList(),
             refreshAvailable = true,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
         assertTrue(decision is LabyrinthShopDecision.BuyRelic)
     }
 
     @Test
-    fun `does not refresh before final area`() {
+    fun `unclassified item before refresh starting area waits rather than closing`() {
         val policy = LabyrinthShopPolicy()
         val decision = policy.decide(
             currentArea = 3,
             items = listOf(item("role", null, null, recognized = false, confidence = 0.2)),
             acquired = emptyList(),
             refreshAvailable = true,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
-        assertTrue(decision is LabyrinthShopDecision.Close)
+        assertTrue(decision is LabyrinthShopDecision.Wait)
     }
 
     @Test
-    fun `unclassified affordable good does not prove an exhausted relic stock cycle`() {
+    fun `unclassified affordable good cannot prove depletion or authorize closing`() {
         val policy = LabyrinthShopPolicy()
         val decision = policy.decide(
             currentArea = 5,
             items = listOf(item("role", null, null, recognized = false, confidence = 0.2)),
             acquired = emptyList(),
             refreshAvailable = true,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
-        assertTrue(decision is LabyrinthShopDecision.Close)
+        assertTrue(decision is LabyrinthShopDecision.Wait)
     }
 
     @Test
@@ -83,12 +116,16 @@ class LabyrinthShopPolicyTest {
             items = listOf(item("maybe", "会心", 1, recognized = false, confidence = 0.70)),
             acquired = emptyList(),
             refreshAvailable = true,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
         assertTrue(decision is LabyrinthShopDecision.Wait)
     }
 
     @Test
-    fun `disabled recognized relic is never purchased and does not block close or refresh`() {
+    fun `disabled recognized relic never buys and full scan permits close or refresh`() {
         val disabled = item(
             "too-expensive",
             "会心",
@@ -102,6 +139,10 @@ class LabyrinthShopPolicyTest {
                 items = listOf(disabled),
                 acquired = emptyList(),
                 refreshAvailable = false,
+                entryBalance = 20_000,
+                currentBalance = 20_000,
+                shelfScanComplete = true,
+                visibleShelfComplete = true,
             ) is LabyrinthShopDecision.Close,
         )
         assertTrue(
@@ -110,7 +151,11 @@ class LabyrinthShopPolicyTest {
                 items = listOf(disabled),
                 acquired = emptyList(),
                 refreshAvailable = true,
-            ) is LabyrinthShopDecision.Close,
+                entryBalance = 20_000,
+                currentBalance = 20_000,
+                shelfScanComplete = true,
+                visibleShelfComplete = true,
+            ) is LabyrinthShopDecision.Refresh,
         )
     }
 
@@ -131,12 +176,16 @@ class LabyrinthShopPolicyTest {
             acquired = emptyList(),
             refreshAvailable = true,
             relicPurchasesInCycle = 2,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
         assertTrue(decision is LabyrinthShopDecision.BuyRelic)
     }
 
     @Test
-    fun `completed three relic cycle refresh outranks role imprint`() {
+    fun `completed relic count cannot refresh ahead of current safe random imprint`() {
         val imprint = item(
             "imprint",
             "守备",
@@ -152,12 +201,18 @@ class LabyrinthShopPolicyTest {
             acquired = emptyList(),
             refreshAvailable = true,
             relicPurchasesInCycle = 3,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
-        assertTrue(decision is LabyrinthShopDecision.Refresh)
+        assertTrue(decision is LabyrinthShopDecision.BuyRoleImprint)
+        assertEquals("imprint", (decision as LabyrinthShopDecision.BuyRoleImprint).item.slotId)
+        assertTrue(!decision.opensRolePicker)
     }
 
     @Test
-    fun `three visible imprints recover exhausted relic stock after session restart`() {
+    fun `three visible imprints never infer relic depletion or hide a safe random column`() {
         val items = (1..3).map { index ->
             item(
                 "imprint$index",
@@ -175,9 +230,14 @@ class LabyrinthShopPolicyTest {
             acquired = emptyList(),
             refreshAvailable = true,
             relicPurchasesInCycle = 0,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
-        assertTrue(decision is LabyrinthShopDecision.Refresh)
-        assertTrue((decision as LabyrinthShopDecision.Refresh).reason.contains("恢复"))
+        assertTrue(decision is LabyrinthShopDecision.BuyRoleImprint)
+        assertEquals("imprint1", (decision as LabyrinthShopDecision.BuyRoleImprint).item.slotId)
+        assertTrue(!decision.opensRolePicker)
     }
 
     @Test
@@ -190,6 +250,10 @@ class LabyrinthShopPolicyTest {
                     acquired = emptyList(),
                     refreshAvailable = true,
                     relicPurchasesInCycle = purchased,
+                    entryBalance = 20_000,
+                    currentBalance = 20_000,
+                    shelfScanComplete = true,
+                    visibleShelfComplete = true,
                 )
                 assertTrue("category=$category purchased=$purchased: $decision", decision is LabyrinthShopDecision.Refresh)
             }
@@ -197,48 +261,58 @@ class LabyrinthShopPolicyTest {
     }
 
     @Test
-    fun `depleted row follows every configured starting area except the area four saving stop`() {
+    fun `depleted row follows every starting area except role-only area four`() {
         for (start in 1..5) {
             for (area in 1..5) {
                 val decision = LabyrinthShopPolicy(finalArea = start).decide(
                     area, disabledRow(), emptyList(), refreshAvailable = true,
+                    entryBalance = 20_000,
+                    currentBalance = 20_000,
+                    shelfScanComplete = true,
+                    visibleShelfComplete = true,
                 )
                 val expectRefresh = area != 4 && area >= start
                 assertEquals("start=$start area=$area: $decision", expectRefresh, decision is LabyrinthShopDecision.Refresh)
             }
         }
-        // Area 4 is a hard saving stop: no refresh licence and no relic purchase, even when the
-        // starting area was lowered to 4 and an affordable relic is on the shelf.
+        // Area 4 is role-only: no refresh licence and no relic purchase, even when the
+        // starting area is lowered and a confirmed affordable relic is on the shelf.
         for (start in 1..5) {
             val policy = LabyrinthShopPolicy(finalArea = start)
             assertTrue(
                 "start=$start area=4 refresh",
-                policy.decide(4, disabledRow(), emptyList(), refreshAvailable = true) is LabyrinthShopDecision.Close,
+                policy.decide(4, disabledRow(), emptyList(), refreshAvailable = true,
+                    entryBalance = 20_000,
+                    currentBalance = 20_000,
+                    shelfScanComplete = true,
+                    visibleShelfComplete = true,
+                ) is LabyrinthShopDecision.Close,
             )
             assertTrue(
                 "start=$start area=4 buy",
                 policy.decide(
                     4, listOf(item("relic", "会心", 1, true)), emptyList(), refreshAvailable = true,
+                    entryBalance = 20_000,
+                    currentBalance = 20_000,
+                    shelfScanComplete = true,
+                    visibleShelfComplete = true,
                 ) is LabyrinthShopDecision.Close,
             )
         }
     }
 
     @Test
-    fun `area three stops refreshing after its single refill budget`() {
+    fun `area three permits exactly two successful refills`() {
         val policy = LabyrinthShopPolicy(finalArea = 3)
-        assertTrue(
-            "first refill",
-            policy.decide(
-                3, disabledRow(), emptyList(), refreshAvailable = true, refreshesUsedInVisit = 0,
-            ) is LabyrinthShopDecision.Refresh,
-        )
-        // A second 300-coin refill in area 3 used to return a row the remaining balance could not
-        // buy from, so the budget ends the visit instead.
-        val spent = policy.decide(
-            3, disabledRow(), emptyList(), refreshAvailable = true, refreshesUsedInVisit = 1,
-        )
-        assertTrue("second refill: $spent", spent is LabyrinthShopDecision.Close)
+        for (used in 0..2) {
+            val decision = policy.decide(
+                3, disabledRow(), emptyList(), refreshAvailable = true, refreshesUsedInVisit = used,
+                entryBalance = 20_000, currentBalance = 20_000,
+                shelfScanComplete = true, visibleShelfComplete = true,
+            )
+            if (used < 2) assertTrue("successful=$used: $decision", decision is LabyrinthShopDecision.Refresh)
+            else assertTrue("successful=$used: $decision", decision is LabyrinthShopDecision.Close)
+        }
     }
 
     @Test
@@ -249,91 +323,150 @@ class LabyrinthShopPolicyTest {
                 "used=$used",
                 policy.decide(
                     5, disabledRow(), emptyList(), refreshAvailable = true, refreshesUsedInVisit = used,
+                    entryBalance = 20_000,
+                    currentBalance = 20_000,
+                    shelfScanComplete = true,
+                    visibleShelfComplete = true,
                 ) is LabyrinthShopDecision.Refresh,
             )
         }
     }
 
     @Test
-    fun `area three spends the remaining coins on an imprint instead of a second refill`() {
+    fun `area three buys current random imprint when each successful-refill budget permits`() {
         val imprint = item("imprint", null, null, false,
-            kind = LabyrinthShopItemKind.ROLE_IMPRINT, roleImprintLabel = "坦克型职能印记")
+            kind = LabyrinthShopItemKind.ROLE_IMPRINT, roleImprintLabel = "坦克型职能印记", priceCoins = 780)
         val row = disabledRow().take(2) + imprint
         val policy = LabyrinthShopPolicy(finalArea = 3)
-        assertTrue(
-            policy.decide(
-                3, row, emptyList(), refreshAvailable = true, refreshesUsedInVisit = 0,
-            ) is LabyrinthShopDecision.Refresh,
+        for ((used, balance) in listOf(0 to 8_700, 1 to 4_890, 2 to 780)) {
+            val decision = policy.decide(
+                3, row, emptyList(), refreshAvailable = true, refreshesUsedInVisit = used,
+                entryBalance = 20_000, currentBalance = balance,
+                shelfScanComplete = true, visibleShelfComplete = true,
+            )
+            assertTrue("successful=$used balance=$balance: $decision", decision is LabyrinthShopDecision.BuyRoleImprint)
+        }
+        val belowReserve = policy.decide(
+            3, row, emptyList(), refreshAvailable = true, refreshesUsedInVisit = 0,
+            entryBalance = 20_000, currentBalance = 8_699,
+            shelfScanComplete = true, visibleShelfComplete = true,
         )
-        assertTrue(
-            policy.decide(
-                3, row, emptyList(), refreshAvailable = true, refreshesUsedInVisit = 1,
-            ) is LabyrinthShopDecision.BuyRoleImprint,
-        )
+        assertTrue(belowReserve is LabyrinthShopDecision.Refresh)
     }
 
     @Test
     fun `depleted row respects disabled settings unknown area and insufficient refresh funds`() {
         assertTrue(LabyrinthShopPolicy(refreshEnabled = false).decide(
             5, disabledRow(), emptyList(), refreshAvailable = true,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         ) is LabyrinthShopDecision.Close)
         assertTrue(LabyrinthShopPolicy(buyRelics = false).decide(
             5, disabledRow(), emptyList(), refreshAvailable = true,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         ) is LabyrinthShopDecision.Close)
         assertTrue(LabyrinthShopPolicy().decide(
             null, disabledRow(), emptyList(), refreshAvailable = true,
         ) is LabyrinthShopDecision.Close)
         assertTrue(LabyrinthShopPolicy().decide(
             5, disabledRow(), emptyList(), refreshAvailable = false,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         ) is LabyrinthShopDecision.Close)
     }
 
     @Test
-    fun `depleted row refresh outranks affordable imprint even with incomplete purchase count`() {
+    fun `depleted relic row cannot refresh ahead of affordable random imprint`() {
         val imprint = item("imprint", null, null, false, kind = LabyrinthShopItemKind.ROLE_IMPRINT,
             roleImprintLabel = "坦克型职能印记")
         val row = disabledRow().take(2) + imprint
         assertTrue(LabyrinthShopPolicy().decide(
             5, row, emptyList(), refreshAvailable = true, relicPurchasesInCycle = 1,
-        ) is LabyrinthShopDecision.Refresh)
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
+        ) is LabyrinthShopDecision.BuyRoleImprint)
         assertTrue(LabyrinthShopPolicy().decide(
             5, row, emptyList(), refreshAvailable = false, relicPurchasesInCycle = 1,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         ) is LabyrinthShopDecision.BuyRoleImprint)
     }
 
     @Test
-    fun `unknown refresh anchor waits instead of closing or buying imprint`() {
+    fun `unknown refresh anchor waits only without a current safe normal buy`() {
         for (purchased in listOf(0, 3)) {
             assertTrue(LabyrinthShopPolicy().decide(
                 5, disabledRow(), emptyList(), refreshAvailable = false,
                 relicPurchasesInCycle = purchased, refreshAvailabilityKnown = false,
+                entryBalance = 20_000, currentBalance = 20_000,
+                shelfScanComplete = true, visibleShelfComplete = true,
             ) is LabyrinthShopDecision.Wait)
         }
         val imprints = (1..3).map { item("imprint$it", null, null, false,
             kind = LabyrinthShopItemKind.ROLE_IMPRINT, roleImprintLabel = "坦克型职能印记") }
         assertTrue(LabyrinthShopPolicy().decide(
             5, imprints, emptyList(), refreshAvailable = false, refreshAvailabilityKnown = false,
-        ) is LabyrinthShopDecision.Wait)
+            entryBalance = 20_000, currentBalance = 20_000,
+            shelfScanComplete = true, visibleShelfComplete = true,
+        ) is LabyrinthShopDecision.BuyRoleImprint)
         assertTrue(LabyrinthShopPolicy(refreshEnabled = false).decide(
             5, disabledRow(), emptyList(), refreshAvailable = false, refreshAvailabilityKnown = false,
+            entryBalance = 20_000, currentBalance = 20_000,
+            shelfScanComplete = true, visibleShelfComplete = true,
         ) is LabyrinthShopDecision.Close)
     }
 
     @Test
-    fun `depletion recovery does not skip an affordable relic or unread item`() {
+    fun `depletion checks keep safe relics and never skip unread or missing controls`() {
         val policy = LabyrinthShopPolicy()
         val disabled = disabledRow().take(2)
         assertTrue(policy.decide(5, disabled + item("relic", "会心", 1, true), emptyList(),
-            refreshAvailable = true) is LabyrinthShopDecision.BuyRelic)
+            refreshAvailable = true,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
+        ) is LabyrinthShopDecision.BuyRelic)
         val reading = item("reading", null, null, false).copy(categoryState = LabyrinthShopCategoryState.READING)
         assertTrue(policy.decide(5, disabled + reading, emptyList(),
-            refreshAvailable = true) is LabyrinthShopDecision.Wait)
+            refreshAvailable = true,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
+        ) is LabyrinthShopDecision.Wait)
         assertTrue(policy.decide(5, disabled + item("unread", null, null, false), emptyList(),
-            refreshAvailable = true) !is LabyrinthShopDecision.Refresh)
+            refreshAvailable = true,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
+        ) is LabyrinthShopDecision.Wait)
         assertTrue(policy.decide(5, disabled + disabledRow().last().copy(status = LabyrinthShopItemStatus.UNKNOWN),
-            emptyList(), refreshAvailable = true) is LabyrinthShopDecision.Wait)
+            emptyList(), refreshAvailable = true,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
+        ) is LabyrinthShopDecision.Wait)
         assertTrue(policy.decide(5, disabled, emptyList(),
-            refreshAvailable = true) !is LabyrinthShopDecision.Refresh)
+            refreshAvailable = true,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = false,
+        ) is LabyrinthShopDecision.Wait)
     }
 
     private fun disabledRow() = (1..3).map { index ->
@@ -341,7 +474,7 @@ class LabyrinthShopPolicyTest {
     }
 
     @Test
-    fun `unknown imprint class is never bought blindly when refresh is unavailable`() {
+    fun `unknown imprint identity waits instead of buying or closing when refresh is unavailable`() {
         val imprint = item(
             "imprint",
             "守备",
@@ -356,12 +489,16 @@ class LabyrinthShopPolicyTest {
             items = listOf(imprint),
             acquired = emptyList(),
             refreshAvailable = false,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
-        assertTrue(decision is LabyrinthShopDecision.Close)
+        assertTrue(decision is LabyrinthShopDecision.Wait)
     }
 
     @Test
-    fun `role imprint is bought only after no relic purchase or completed cycle refresh remains`() {
+    fun `safe random imprint is bought when no star1 is currently buyable`() {
         val imprint = item(
             "imprint",
             "守备",
@@ -380,6 +517,10 @@ class LabyrinthShopPolicyTest {
             acquired = emptyList(),
             refreshAvailable = false,
             relicPurchasesInCycle = 2,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         ) as LabyrinthShopDecision.BuyRoleImprint
         assertEquals("增益型职能印记", decision.label)
     }
@@ -400,12 +541,16 @@ class LabyrinthShopPolicyTest {
             items = listOf(imprint),
             acquired = emptyList(),
             refreshAvailable = false,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
         assertTrue(decision is LabyrinthShopDecision.BuyRoleImprint)
     }
 
     @Test
-    fun `area three closes after its first three relic purchases even when refill goods look relic-like`() {
+    fun `area three committed count never closes over unresolved relic-like goods`() {
         val policy = LabyrinthShopPolicy()
         val decision = policy.decide(
             currentArea = 3,
@@ -417,12 +562,16 @@ class LabyrinthShopPolicyTest {
             acquired = emptyList(),
             refreshAvailable = true,
             relicPurchasesInCycle = 3,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
-        assertTrue(decision is LabyrinthShopDecision.Close)
+        assertTrue(decision is LabyrinthShopDecision.Wait)
     }
 
     @Test
-    fun `committed purchase count permits refresh while an incomplete count still checks ambiguous goods`() {
+    fun `committed purchase counts never bypass ambiguous current goods before refill`() {
         val policy = LabyrinthShopPolicy()
         val ambiguous = listOf(item("role", "守备", 1, recognized = false, confidence = 0.72))
         assertTrue(
@@ -432,6 +581,10 @@ class LabyrinthShopPolicyTest {
                 acquired = emptyList(),
                 refreshAvailable = true,
                 relicPurchasesInCycle = 2,
+                entryBalance = 20_000,
+                currentBalance = 20_000,
+                shelfScanComplete = true,
+                visibleShelfComplete = true,
             ) is LabyrinthShopDecision.Wait,
         )
         assertTrue(
@@ -441,19 +594,35 @@ class LabyrinthShopPolicyTest {
                 acquired = emptyList(),
                 refreshAvailable = true,
                 relicPurchasesInCycle = 3,
-            ) is LabyrinthShopDecision.Refresh,
+                entryBalance = 20_000,
+                currentBalance = 20_000,
+                shelfScanComplete = true,
+                visibleShelfComplete = true,
+            ) is LabyrinthShopDecision.Wait,
         )
     }
 
     @Test
-    fun `area four never buys even a safely recognized relic`() {
-        val decision = LabyrinthShopPolicy().decide(
+    fun `area four never buys relics but buys confirmed role-mode goods below10000`() {
+        val policy = LabyrinthShopPolicy()
+        val relicDecision = policy.decide(
             currentArea = 4,
             items = listOf(item("r1", "会心", 1, recognized = true)),
-            acquired = emptyList(),
-            refreshAvailable = true,
+            acquired = emptyList(), refreshAvailable = true,
+            entryBalance = 20_000, currentBalance = 9_000,
+            shelfScanComplete = true, visibleShelfComplete = true,
         )
-        assertTrue(decision is LabyrinthShopDecision.Close)
+        assertTrue(relicDecision is LabyrinthShopDecision.Close)
+        val roleDecision = policy.decide(
+            currentArea = 4,
+            items = listOf(item("role", null, null, false, kind = LabyrinthShopItemKind.ROLE_IMPRINT,
+                roleImprintLabel = "治疗型职能印记", priceCoins = 780)),
+            acquired = emptyList(), refreshAvailable = true,
+            entryBalance = 20_000, currentBalance = 9_000,
+            shelfScanComplete = true, visibleShelfComplete = true,
+        )
+        assertTrue(roleDecision is LabyrinthShopDecision.BuyRoleImprint)
+        assertEquals("role", (roleDecision as LabyrinthShopDecision.BuyRoleImprint).item.slotId)
     }
 
     @Test
@@ -481,7 +650,12 @@ class LabyrinthShopPolicyTest {
             LabyrinthRelicMark.DEFENSE to 3)
         fun choose(area: Int) = (LabyrinthShopPolicy().decide(area,
             listOf(item("defense", "守备", 1, true), item("speed", "加速", 1, true)),
-            emptyList(), stacks, false) as LabyrinthShopDecision.BuyRelic).relicDecision.choice.relicId
+            emptyList(), stacks, false,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
+        ) as LabyrinthShopDecision.BuyRelic).relicDecision.choice.relicId
         assertEquals("defense", choose(3))
         assertEquals("speed", choose(5))
     }
@@ -492,15 +666,30 @@ class LabyrinthShopPolicyTest {
         // Area 3 never buys a refused relic.
         assertTrue("area 3 must not buy a ★3 relic",
             policy.decide(3, listOf(item("rare", "会心", 2, recognized = true, rarity = 3)),
-                emptyList(), refreshAvailable = false) is LabyrinthShopDecision.Close)
+                emptyList(), refreshAvailable = false,
+                entryBalance = 20_000,
+                currentBalance = 20_000,
+                shelfScanComplete = true,
+                visibleShelfComplete = true,
+            ) is LabyrinthShopDecision.Close)
         // Area 5 clears a ★3 relic out once the refill button is dead.
         assertTrue("area 5 must clear out a ★3 relic after the refill dies",
             policy.decide(5, listOf(item("rare", "会心", 2, recognized = true, rarity = 3)),
-                emptyList(), refreshAvailable = false) is LabyrinthShopDecision.BuyRelic)
+                emptyList(), refreshAvailable = false,
+                entryBalance = 20_000,
+                currentBalance = 20_000,
+                shelfScanComplete = true,
+                visibleShelfComplete = true,
+            ) is LabyrinthShopDecision.BuyRelic)
         // ★4 stays refused even during the clear-out.
         assertTrue("★4 stays refused in area 5",
             policy.decide(5, listOf(item("rare", "会心", 2, recognized = true, rarity = 4)),
-                emptyList(), refreshAvailable = false) is LabyrinthShopDecision.Close)
+                emptyList(), refreshAvailable = false,
+                entryBalance = 20_000,
+                currentBalance = 20_000,
+                shelfScanComplete = true,
+                visibleShelfComplete = true,
+            ) is LabyrinthShopDecision.Close)
     }
 
     @Test
@@ -513,6 +702,10 @@ class LabyrinthShopPolicyTest {
                     items = listOf(item("cheap", "会心", 1, recognized = true, rarity = rarity)),
                     acquired = emptyList(),
                     refreshAvailable = false,
+                    entryBalance = 20_000,
+                    currentBalance = 20_000,
+                    shelfScanComplete = true,
+                    visibleShelfComplete = true,
                 )
                 assertTrue(
                     "area $area must buy a ★$rarity relic: $decision",
@@ -548,6 +741,10 @@ class LabyrinthShopPolicyTest {
             acquired = emptyList(),
             refreshAvailable = true,
             relicPurchasesInCycle = 3,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
         assertTrue("exhausted cycle with only gated relics must refresh: $refresh",
             refresh is LabyrinthShopDecision.Refresh)
@@ -561,6 +758,10 @@ class LabyrinthShopPolicyTest {
             ),
             acquired = emptyList(),
             refreshAvailable = false,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
         assertTrue("area 3 must fall through to the imprint fallback: $imprint",
             imprint is LabyrinthShopDecision.BuyRoleImprint)
@@ -573,10 +774,20 @@ class LabyrinthShopPolicyTest {
             kind = LabyrinthShopItemKind.ROLE_IMPRINT,
             roleImprintLabel = "坦克型职能印记", choiceRoleImprint = true)
         assertTrue("area 3 must skip a role-specific 选择 imprint",
-            policy.decide(3, listOf(choiceOnly), emptyList(), refreshAvailable = false)
+            policy.decide(3, listOf(choiceOnly), emptyList(), refreshAvailable = false,
+                entryBalance = 20_000,
+                currentBalance = 20_000,
+                shelfScanComplete = true,
+                visibleShelfComplete = true,
+            )
                 is LabyrinthShopDecision.Close)
         assertTrue("area 5 clears the choice imprint out once the refill dies",
-            policy.decide(5, listOf(choiceOnly), emptyList(), refreshAvailable = false)
+            policy.decide(5, listOf(choiceOnly), emptyList(), refreshAvailable = false,
+                entryBalance = 20_000,
+                currentBalance = 20_000,
+                shelfScanComplete = true,
+                visibleShelfComplete = true,
+            )
                 is LabyrinthShopDecision.BuyRoleImprint)
     }
 
@@ -591,6 +802,10 @@ class LabyrinthShopPolicyTest {
                     roleImprintLabel = "坦克型职能印记", choiceRoleImprint = false)),
                 acquired = emptyList(),
                 refreshAvailable = false,
+                entryBalance = 20_000,
+                currentBalance = 20_000,
+                shelfScanComplete = true,
+                visibleShelfComplete = true,
             )
             assertTrue("area $area must buy a random imprint: $decision",
                 decision is LabyrinthShopDecision.BuyRoleImprint)
@@ -598,7 +813,7 @@ class LabyrinthShopPolicyTest {
     }
 
     @Test
-    fun `the all-roster choice imprint is not gated`() {
+    fun `area three retains budgeted all-roster choice fallback when refresh is not permitted`() {
         val policy = LabyrinthShopPolicy()
         val decision = policy.decide(
             currentArea = 3,
@@ -607,6 +822,10 @@ class LabyrinthShopPolicyTest {
                 roleImprintLabel = "全体选择印记", choiceRoleImprint = true)),
             acquired = emptyList(),
             refreshAvailable = false,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
         assertTrue("全体选择印记 keeps the fallback behaviour: $decision",
             decision is LabyrinthShopDecision.BuyRoleImprint)
@@ -648,6 +867,10 @@ class LabyrinthShopPolicyTest {
             acquired = emptyList(),
             refreshAvailable = true,
             relicPurchasesInCycle = 2,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
         assertTrue("a row with only refused goods must refill: $decision",
             decision is LabyrinthShopDecision.Refresh)
@@ -668,6 +891,10 @@ class LabyrinthShopPolicyTest {
             acquired = emptyList(),
             refreshAvailable = true,
             relicPurchasesInCycle = 2,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
         assertTrue("an unread affordable slot must not be skipped by a refill: $decision",
             decision is LabyrinthShopDecision.Wait)
@@ -688,6 +915,10 @@ class LabyrinthShopPolicyTest {
             acquired = emptyList(),
             refreshAvailable = true,
             relicPurchasesInCycle = 2,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
         assertTrue("the ★2 relic must still be bought: $decision",
             decision is LabyrinthShopDecision.BuyRelic)
@@ -712,6 +943,10 @@ class LabyrinthShopPolicyTest {
             acquired = emptyList(),
             refreshAvailable = true,
             relicPurchasesInCycle = 2,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
         assertTrue("area 3 must not refill: $decision", decision is LabyrinthShopDecision.Close)
     }
@@ -729,6 +964,10 @@ class LabyrinthShopPolicyTest {
             acquired = emptyList(),
             refreshAvailable = false,
             relicPurchasesInCycle = 1,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
         assertTrue("area 5 must clear out a ★3 relic after the refill dies: $decision",
             decision is LabyrinthShopDecision.BuyRelic)
@@ -749,6 +988,10 @@ class LabyrinthShopPolicyTest {
             acquired = emptyList(),
             refreshAvailable = false,
             relicPurchasesInCycle = 1,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
         assertTrue("area 5 must clear out a choice imprint after the refill dies: $decision",
             decision is LabyrinthShopDecision.BuyRoleImprint)
@@ -769,6 +1012,10 @@ class LabyrinthShopPolicyTest {
             acquired = emptyList(),
             refreshAvailable = false,
             relicPurchasesInCycle = 1,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
         assertTrue("★3 (12.35/point) must go before the choice imprint (21/point): $decision",
             decision is LabyrinthShopDecision.BuyRelic)
@@ -789,6 +1036,10 @@ class LabyrinthShopPolicyTest {
             acquired = emptyList(),
             refreshAvailable = false,
             relicPurchasesInCycle = 1,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
         assertTrue("the random imprint (9.00/point) must go before ★3 (12.35/point): $decision",
             decision is LabyrinthShopDecision.BuyRoleImprint)
@@ -807,6 +1058,10 @@ class LabyrinthShopPolicyTest {
             acquired = emptyList(),
             refreshAvailable = true,
             relicPurchasesInCycle = 1,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
         assertTrue("a live refill must still be preferred over a ★3 relic: $decision",
             decision is LabyrinthShopDecision.Refresh)
@@ -825,6 +1080,10 @@ class LabyrinthShopPolicyTest {
             acquired = emptyList(),
             refreshAvailable = false,
             relicPurchasesInCycle = 1,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
         assertTrue("only area 5 clears out: $decision", decision is LabyrinthShopDecision.Close)
     }
@@ -842,6 +1101,10 @@ class LabyrinthShopPolicyTest {
             acquired = emptyList(),
             refreshAvailable = false,
             relicPurchasesInCycle = 1,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
         assertTrue("★4 stays refused at 32.5 coins/point: $decision",
             decision is LabyrinthShopDecision.Close)
@@ -850,10 +1113,10 @@ class LabyrinthShopPolicyTest {
     /**
      * 2026-11-09 bundle: area 5 shop, refill already dark, one purchasable role imprint whose title
      * OCR only produced "职能印记" without a role name. The policy used to close the visit with
-     * coins left; it must wait on the remaining title crops instead, and only close once the
-     * recognition grace window has expired.
+     * coins left; it must wait on remaining title crops instead. Expired OCR is still missing
+     * identity evidence, so the parent session owns the bounded stop rather than inferring no stock.
      */
-    @Test fun `area 5 waits on an imprint whose role name is still being read`() {
+    @Test fun `area 5 unread imprint stays missing evidence until parent bounded stop`() {
         val policy = LabyrinthShopPolicy()
         fun row(pending: Boolean, label: String? = null) = listOf(
             item("1", null, null, recognized = false, status = LabyrinthShopItemStatus.DISABLED),
@@ -868,6 +1131,10 @@ class LabyrinthShopPolicyTest {
             refreshAvailable = false,
             relicPurchasesInCycle = 3,
             refreshAvailabilityKnown = true,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
 
         val waiting = decide(row(pending = true))
@@ -878,8 +1145,12 @@ class LabyrinthShopPolicyTest {
         val recovered = decide(row(pending = false, label = "治疗型职能印记"))
         assertEquals("2", (recovered as LabyrinthShopDecision.BuyRoleImprint).item.slotId)
 
-        // Grace window over: the visit closes so the run can never park on an unreadable title.
-        assertTrue(decide(row(pending = false)) is LabyrinthShopDecision.Close)
+        // An exhausted OCR window is not evidence of empty stock; the parent owns the bounded stop.
+        assertTrue(decide(row(pending = false)) is LabyrinthShopDecision.Wait)
+        val exhausted = row(pending = false).map {
+            if (it.slotId == "2") it.copy(categoryState = LabyrinthShopCategoryState.EXHAUSTED) else it
+        }
+        assertTrue(decide(exhausted) is LabyrinthShopDecision.Wait)
     }
 
     /** Area 3 reports the same symptom, and it refreshes nothing, so the wait matters there too. */
@@ -898,6 +1169,10 @@ class LabyrinthShopPolicyTest {
             refreshAvailable = false,
             relicPurchasesInCycle = 3,
             refreshAvailabilityKnown = true,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
         assertTrue(waiting is LabyrinthShopDecision.Wait)
     }
@@ -914,6 +1189,10 @@ class LabyrinthShopPolicyTest {
             ),
             acquired = emptyList(),
             refreshAvailable = false,
+            entryBalance = 20_000,
+            currentBalance = 20_000,
+            shelfScanComplete = true,
+            visibleShelfComplete = true,
         )
         assertEquals("2", (decision as LabyrinthShopDecision.BuyRoleImprint).item.slotId)
     }
@@ -927,10 +1206,25 @@ class LabyrinthShopPolicyTest {
         status: LabyrinthShopItemStatus = LabyrinthShopItemStatus.AVAILABLE,
         kind: LabyrinthShopItemKind = if (recognized) LabyrinthShopItemKind.RELIC else LabyrinthShopItemKind.UNKNOWN,
         roleImprintLabel: String? = null,
-        rarity: Int = 0,
+        rarity: Int = 1,
         choiceRoleImprint: Boolean = false,
         categoryState: LabyrinthShopCategoryState = LabyrinthShopCategoryState.READY,
         imprintLabelPending: Boolean = false,
+        priceCoins: Int? = when (kind) {
+            LabyrinthShopItemKind.ROLE_IMPRINT -> when {
+                roleImprintLabel == "全体选择印记" -> 2_600
+                choiceRoleImprint -> 1_820
+                else -> 780
+            }
+            LabyrinthShopItemKind.RELIC -> when (rarity) { 1 -> 585; 2 -> 1_820; 3 -> 3_705; 4 -> 6_500; else -> null }
+            LabyrinthShopItemKind.UNKNOWN -> null
+        },
+        imprintForm: LabyrinthShopImprintForm = if (kind == LabyrinthShopItemKind.ROLE_IMPRINT) {
+            if (choiceRoleImprint) LabyrinthShopImprintForm.CHOICE else LabyrinthShopImprintForm.RANDOM
+        } else LabyrinthShopImprintForm.UNKNOWN,
+        identitySafe: Boolean = categoryState == LabyrinthShopCategoryState.READY &&
+            ((kind == LabyrinthShopItemKind.RELIC && recognized) ||
+                (kind == LabyrinthShopItemKind.ROLE_IMPRINT && !roleImprintLabel.isNullOrBlank())),
     ): LabyrinthShopItemMatch {
         val relic = LabyrinthRelicMatch(
             slotId = id,
@@ -961,6 +1255,9 @@ class LabyrinthShopPolicyTest {
             choiceRoleImprint = choiceRoleImprint,
             categoryState = categoryState,
             imprintLabelPending = imprintLabelPending,
+            priceCoins = priceCoins,
+            imprintForm = imprintForm,
+            identitySafe = identitySafe,
         )
     }
 }

@@ -25,6 +25,8 @@ enum class LabyrinthShopItemKind {
     ROLE_IMPRINT,
 }
 
+enum class LabyrinthShopImprintForm { UNKNOWN, RANDOM, CHOICE }
+
 enum class LabyrinthShopCategoryState { READY, READING, EXHAUSTED }
 
 data class LabyrinthShopItemMatch(
@@ -50,6 +52,18 @@ data class LabyrinthShopItemMatch(
      * spending coins, so the shop policy waits on this good instead of ending the visit.
      */
     val imprintLabelPending: Boolean = false,
+    val priceCoins: Int? = null,
+    val imprintForm: LabyrinthShopImprintForm = LabyrinthShopImprintForm.UNKNOWN,
+    val identitySafe: Boolean = false,
+    val evidenceEpoch: Long = 0,
+    val evidenceCapturedAtMillis: Long = Long.MIN_VALUE,
+    val titleRect: EntryPixelRect? = null,
+    val descriptionRect: EntryPixelRect? = null,
+    val iconRect: EntryPixelRect? = null,
+    val priceRect: EntryPixelRect? = null,
+    val titleCropped: Boolean = false,
+    /** A bounded OCR budget key, independent of frame-to-frame pixel noise. */
+    val recognitionScopeId: String = slotId,
 ) {
     val purchasable: Boolean get() = status == LabyrinthShopItemStatus.AVAILABLE
 }
@@ -58,7 +72,7 @@ data class LabyrinthShopItemMatch(
 object LabyrinthShopItemText {
     private val roleLabels = listOf("坦克", "治疗", "强化", "增益", "减益", "干扰", "攻击", "破防")
 
-    private fun normalized(text: String?): String = text.orEmpty()
+    internal fun normalized(text: String?): String = text.orEmpty()
         .replace(Regex("\\s+"), "")
         .replace('職', '职')
         .replace('隨', '随')
@@ -100,7 +114,8 @@ object LabyrinthShopItemText {
     fun isChoiceRoleImprint(text: String?): Boolean {
         val value = normalized(text)
         if (!looksLikeRoleImprint(value)) return false
-        if (value.contains("随机")) return false
+        // "随机职能的选择印记" selects the character, despite the random role prefix.
+        if (value.contains("随机印记")) return false
         return value.contains("选择")
     }
 
@@ -127,6 +142,15 @@ data class LabyrinthShopObservation(
     val refreshButtonEnabledEvidence: Double = 0.0,
     /** The relic shown in the purchase-confirmation dialog, if the icon is trusted. */
     val purchaseCandidate: LabyrinthRelicMatch? = null,
+    val balanceCoins: Int? = null,
+    val balanceReadingExhausted: Boolean = false,
+    val balanceCapturedAtMillis: Long = Long.MIN_VALUE,
+    val evidenceEpoch: Long = 0,
+    val capturedAtMillis: Long = Long.MIN_VALUE,
+    val refreshPriceCoins: Int? = null,
+    val viewport: LabyrinthShopViewport? = null,
+    val refreshPriceReadingExhausted: Boolean = false,
+    val refreshPriceCapturedAtMillis: Long = Long.MIN_VALUE,
 ) {
     val availableItemCount: Int get() = items.count(LabyrinthShopItemMatch::purchasable)
     val recognizedButtonCount: Int get() = items.count { it.buyButtonScore >= BUTTON_MIN_CONFIDENCE }
@@ -164,33 +188,62 @@ class LabyrinthShopRecognizer(
         frame: PixelImage,
         dialogState: LabyrinthShopDialogState = LabyrinthShopDialogState.NONE,
     ): LabyrinthShopObservation {
-        val items = TOP_ROW_SLOTS.map { slot ->
-            val screenRect = map(frame, slot.cardRect)
-            val buyButtonRect = map(frame, slot.buyButtonRect)
-            val iconRect = map(frame, slot.iconRect)
-            val score = buyButtonTemplate?.let {
-                matcher.score(frame, buyButtonRect, it, minimumChannelScore = 0.0)
-            } ?: 0.0
-            val enabledEvidence = buyButtonEnabledEvidence(frame, buyButtonRect)
-            val relicMatch = matchRelic(frame, slot.id, screenRect, iconRect)
-            LabyrinthShopItemMatch(
-                slotId = slot.id,
-                screenRect = screenRect,
-                buyButtonRect = buyButtonRect,
-                buyButtonScore = score,
-                buyButtonEnabledEvidence = enabledEvidence,
-                status = when {
-                    score < minButtonConfidence -> LabyrinthShopItemStatus.UNKNOWN
-                    enabledEvidence >= MIN_ENABLED_BUTTON_EVIDENCE -> LabyrinthShopItemStatus.AVAILABLE
-                    else -> LabyrinthShopItemStatus.DISABLED
-                },
-                relicMatch = relicMatch,
-                kind = if (relicMatch?.recognized == true) {
-                    LabyrinthShopItemKind.RELIC
-                } else {
-                    LabyrinthShopItemKind.UNKNOWN
-                },
-            )
+        val content = ShopViewport.contentRect(frame)
+        val columns = TOP_ROW_SLOTS.map { slot ->
+            val nominal = map(frame, slot.buyButtonRect)
+            val buttons = locateColumnButtons(frame, nominal, content)
+                .ifEmpty { listOf(nominal to 0.0) }
+            buttons.map { (button, score) ->
+                val dy = button.top - nominal.top
+                val dx = button.left - nominal.left
+                fun roi(referenceRect: EntryReferenceRect): EntryPixelRect? {
+                    val base = map(frame, referenceRect)
+                    val left = maxOf(content.left, base.left + dx)
+                    val top = maxOf(content.top, base.top + dy)
+                    val right = minOf(content.right, base.right + dx)
+                    val bottom = minOf(content.bottom, base.bottom + dy)
+                    return if (right > left && bottom > top) EntryPixelRect(left, top, right - left, bottom - top) else null
+                }
+                val screenRect = roi(slot.cardRect) ?: map(frame, slot.cardRect)
+                val rawTitle = map(frame, EntryReferenceRect(slot.cardRect.x + 41, 230, 390, 55))
+                val titleRect = roi(EntryReferenceRect(slot.cardRect.x + 41, 230, 390, 55))
+                val iconRect = roi(slot.iconRect)
+                val descriptionRect = roi(EntryReferenceRect(slot.iconRect.x + 160, 315, 370, 145))
+                val priceRect = roi(EntryReferenceRect(slot.iconRect.x + 80, 490, 162, 70))
+                val titleCropped = titleRect == null || titleRect.height != rawTitle.height || titleRect.width != rawTitle.width
+                val key = ShopViewport.fingerprint(frame, listOfNotNull(titleRect, iconRect, priceRect))
+                val id = slot.id + "@" + button.top + ":" + key
+                val enabled = buyButtonEnabledEvidence(frame, button)
+                // The existing RGB catalog matcher and its confidence/margin are unchanged.
+                val fullIcon = map(frame, slot.iconRect)
+                val relic = iconRect?.takeIf { it.width == fullIcon.width && it.height == fullIcon.height }
+                    ?.let { matchRelic(frame, id, screenRect, it) }
+                LabyrinthShopItemMatch(
+                    slotId = id, screenRect = screenRect, buyButtonRect = button,
+                    buyButtonScore = score, buyButtonEnabledEvidence = enabled,
+                    status = when {
+                        score < minButtonConfidence -> LabyrinthShopItemStatus.UNKNOWN
+                        enabled >= MIN_ENABLED_BUTTON_EVIDENCE -> LabyrinthShopItemStatus.AVAILABLE
+                        else -> LabyrinthShopItemStatus.DISABLED
+                    },
+                    relicMatch = relic,
+                    kind = if (relic?.recognized == true) LabyrinthShopItemKind.RELIC else LabyrinthShopItemKind.UNKNOWN,
+                    titleRect = titleRect, descriptionRect = descriptionRect, iconRect = iconRect,
+                    priceRect = priceRect, titleCropped = titleCropped,
+                    recognitionScopeId = slot.id + ":" + button.top,
+                )
+            }
+        }
+        val items = columns.flatten()
+        // Complete means all CURRENTLY fully observable control rows, in every column.
+        // A partially exposed lower row is not empty stock: the visual thumb still requires Browse.
+        // It must not prevent the fully checked first row from authorizing that first descent.
+        val rowCounts = columns.map { it.size }.distinct()
+        val controlsComplete = rowCounts.size == 1 && columns.all { column ->
+            column.isNotEmpty() && column.all { it.status != LabyrinthShopItemStatus.UNKNOWN }
+        } && columns.first().indices.all { row ->
+            val rowButtons = columns.map { it[row].buyButtonRect }
+            rowButtons.maxOf { it.top } - rowButtons.minOf { it.top } <= rowButtons.minOf { it.height } / 3
         }
         val purchaseCandidate = if (dialogState == LabyrinthShopDialogState.PURCHASE_CONFIRMATION) {
             val trustedCandidates = PURCHASE_DIALOG_ICON_RECTS.mapNotNull { referenceRect ->
@@ -210,7 +263,63 @@ class LabyrinthShopRecognizer(
             dialogState = dialogState,
             refreshButtonEnabledEvidence = buyButtonEnabledEvidence(frame, map(frame, REFRESH_BUTTON_RECT)),
             purchaseCandidate = purchaseCandidate,
+            viewport = ShopViewport.recognize(frame, controlsComplete),
         )
+    }
+
+    /** Search the WHOLE content column; there is no fixed lower-half or y=280 purchase target. */
+    private fun locateColumnButtons(frame: PixelImage, nominal: EntryPixelRect, content: EntryPixelRect): List<Pair<EntryPixelRect, Double>> {
+        val template = buyButtonTemplate ?: return emptyList()
+        val step = maxOf(2, (nominal.height / 15.0).roundToInt())
+        fun score(rect: EntryPixelRect): Double {
+            if (rect.left < content.left || rect.right > content.right || rect.top < content.top || rect.bottom > content.bottom) return 0.0
+            if (!hasBlueButtonBody(frame, rect)) return 0.0
+            return matcher.score(frame, rect, template, minimumChannelScore = 0.0)
+        }
+        val candidates = mutableListOf<Pair<EntryPixelRect, Double>>()
+        val original = score(nominal)
+        if (original >= minButtonConfidence) candidates += nominal to original
+        var top = content.top
+        while (top + nominal.height <= content.bottom) {
+            val rect = nominal.copy(top = top)
+            val value = score(rect)
+            if (value >= minButtonConfidence) candidates += rect to value
+            top += step
+        }
+        val peaks = mutableListOf<Pair<EntryPixelRect, Double>>()
+        for (candidate in candidates.sortedByDescending { it.second }) {
+            if (peaks.any { kotlin.math.abs(it.first.top - candidate.first.top) < nominal.height * 0.65 }) continue
+            var best = candidate
+            val radiusX = maxOf(1, nominal.width / 100)
+            for (dy in -step..step) for (dx in -radiusX..radiusX) {
+                val y = candidate.first.top + dy
+                val x = candidate.first.left + dx
+                if (x < 0 || y < 0) continue
+                val rect = candidate.first.copy(left = x, top = y)
+                val value = score(rect)
+                if (value > best.second) best = rect to value
+            }
+            // Preserve exact legacy geometry where it already matches essentially as well.
+            if (kotlin.math.abs(best.first.top - nominal.top) < step && original >= best.second - 0.015) best = nominal to original
+            peaks += best
+            if (peaks.size >= 3) break
+        }
+        return peaks.sortedBy { it.first.top }
+    }
+
+    private fun hasBlueButtonBody(frame: PixelImage, rect: EntryPixelRect): Boolean {
+        var blue = 0
+        var total = 0
+        for (iy in 2..8) for (ix in 2..8) {
+            val color = frame[rect.left + rect.width * ix / 10, rect.top + rect.height * iy / 10]
+            val r = color ushr 16 and 255
+            val g = color ushr 8 and 255
+            val b = color and 255
+            if (b - r >= 20 && b - g >= 8 && b >= 90 && g >= 45) blue++
+            total++
+        }
+        // Also recognizes a dim disabled fill; enabling still uses the separate legacy luma gate.
+        return blue.toDouble() / total >= 0.40
     }
 
     private fun map(frame: PixelImage, rect: EntryReferenceRect): EntryPixelRect =

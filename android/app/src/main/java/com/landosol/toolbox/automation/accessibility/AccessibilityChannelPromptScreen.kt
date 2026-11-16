@@ -48,7 +48,7 @@ class AccessibilityChannelPromptScreen : ChannelPromptScreen {
                 )
             }
             ?: return ChannelPromptClick.GONE
-        val clicked = onMain { node.performAction(AccessibilityNodeInfo.ACTION_CLICK) }
+        val clicked = service.performDirectAction { node.performAction(AccessibilityNodeInfo.ACTION_CLICK) }
         return if (clicked) ChannelPromptClick.CLICKED else ChannelPromptClick.REFUSED
     }
 

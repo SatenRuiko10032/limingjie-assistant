@@ -244,7 +244,13 @@ class AndroidLabyrinthEntryFrameProcessor private constructor(
     private val relicEvidenceVersion: () -> Long,
     private val relicVerificationMarks: () -> Set<String>,
 ) {
-    fun process(frame: CapturedFrame): LabyrinthEntryFrameResult {
+    fun process(frame: CapturedFrame): LabyrinthEntryFrameResult = process(frame, 0L, Long.MIN_VALUE)
+
+    fun process(
+        frame: CapturedFrame,
+        shopEvidenceEpoch: Long,
+        shopEvidenceAfterMillis: Long,
+    ): LabyrinthEntryFrameResult {
         val started = System.nanoTime()
         val pixels = capturedFramePixelImage(frame)
         val result = processor.process(
@@ -256,7 +262,7 @@ class AndroidLabyrinthEntryFrameProcessor private constructor(
         val exResolved = exEncounterResolver.resolve(frame.bitmap, result)
         val exResolvedAt = System.nanoTime()
         val eventResolved = eventChoiceResolver?.resolve(frame.bitmap, exResolved) ?: exResolved
-        val shopResolved = shopItemResolver.resolve(frame.bitmap, eventResolved)
+        val shopResolved = shopItemResolver.resolve(frame.bitmap, eventResolved, frame.timestampMillis, shopEvidenceEpoch, shopEvidenceAfterMillis)
         val roleResolved = roleRewardNameResolver.resolve(frame.bitmap, shopResolved)
         val relicStarted = System.nanoTime()
         val evidenceVersion = relicEvidenceVersion()
@@ -346,7 +352,7 @@ class AndroidLabyrinthEntryFrameProcessor private constructor(
                         eventCustomizationEnabled = eventCustomizationEnabled,
                     )
                 }.getOrNull(),
-                shopItemResolver = AndroidLabyrinthShopItemResolver(),
+                shopItemResolver = AndroidLabyrinthShopItemResolver(context = context),
                 roleRewardNameResolver = AndroidLabyrinthRoleRewardNameResolver(
                     names = characterTemplates.map {
                         LabyrinthCharacterNameCandidate(it.characterId, it.displayName, it.aliases)

@@ -4,6 +4,7 @@ import com.landosol.toolbox.labyrinth.vision.LabyrinthShopItemMatch
 import com.landosol.toolbox.labyrinth.vision.LabyrinthShopItemKind
 import com.landosol.toolbox.labyrinth.vision.LabyrinthShopCategoryState
 import com.landosol.toolbox.labyrinth.vision.LabyrinthShopItemStatus
+import com.landosol.toolbox.labyrinth.vision.LabyrinthShopImprintForm
 
 sealed interface LabyrinthShopDecision {
     data class BuyRelic(
@@ -17,34 +18,26 @@ sealed interface LabyrinthShopDecision {
         val reason: String,
     ) : LabyrinthShopDecision {
         /** 选择印记 opens a full-roster picker after purchase; 随机印记 grants a role outright. */
-        val opensRolePicker: Boolean get() = item.choiceRoleImprint
+        val opensRolePicker: Boolean get() =
+            item.imprintForm == LabyrinthShopImprintForm.CHOICE || item.choiceRoleImprint
     }
 
+    data class Browse(val reason: String) : LabyrinthShopDecision
     data class Refresh(val reason: String) : LabyrinthShopDecision
     data class Close(val reason: String) : LabyrinthShopDecision
     data class Wait(val reason: String) : LabyrinthShopDecision
 }
 
 /**
- * Shop policy for route execution.
+ * Areas 1/2 retain the historical stock-cycle flow in [decide]. Areas 3/4/5 use confirmed
+ * entry/current balances and per-good prices/identities instead of inferring depletion from
+ * purchase counts or three visible imprints. Current safe buys always precede shelf browsing.
  *
- * Rules requested by the live Dry Run:
- * - relics always outrank role-imprint goods;
- * - area 4 never buys and never refreshes: it is a hard saving stop whose coins carry into
- *   area 5, whatever the configured refresh starting area happens to be;
- * - in every other area refresh follows the configured starting area and enable switch;
- * - completed relic cycles, or a fully observed row with no actionable relic, can refresh, but
- *   each shop visit is capped by [refreshLimitsByArea] so a refill that the remaining coins cannot
- *   buy from is not paid for twice by mistake;
- * - when no relic can still be bought and another relic cycle cannot be refreshed, a safely
- *   identified purchasable role imprint may consume the remaining coins and enter role selection;
- * - a purchasable imprint whose role name is still being re-read keeps the visit open for one
- *   bounded grace window instead of closing the shop with the good unsold;
- * - every live good passes bounded title classification before purchase; unresolved goods are
- *   skipped after three crop variants and never count as purchased relic stock.
- *
- * The visible row is evaluated again after every completed purchase. The game compacts later
- * goods into the open slot, so the next decision intentionally does not remember a physical slot.
+ * The caller fixes entryBalance for the whole visit, counts only committed successful refills,
+ * observes the whole visible shelf before browsing, and bounds every [LabyrinthShopDecision.Wait].
+ * A failed identity/price read is not evidence of an empty shelf, even after OCR is exhausted.
+ * Relic ranking still uses the shared choice policy, owned-id filter, locked focus and calibrated
+ * stacks; only area budgets and the order between goods are added here.
  */
 class LabyrinthShopPolicy(
     private val relicChoicePolicy: LabyrinthRelicChoicePolicy = LabyrinthRelicChoicePolicy(),
@@ -75,9 +68,9 @@ class LabyrinthShopPolicy(
     private val randomRoleImprintsOnlyByArea: Map<Int, Boolean> =
         mapOf(3 to true, 5 to true),
     /**
-     * Per-area cap on 300-coin refills inside one shop visit. Area 3 defaults to a single refill:
-     * a second refill there routinely returns a row the current balance cannot buy, so it only
-     * spends coins. Areas absent from this map keep the unlimited behaviour.
+     * Historical stock-cycle caps, retained for callers outside areas 3/4/5. The incremental
+     * area-3 budget branch permits at most two successful refills and area 5 stays unlimited;
+     * neither branch uses this older cap nor assumes the live refill button costs 300 coins.
      */
     private val refreshLimitsByArea: Map<Int, Int> = mapOf(3 to 1),
     /**
@@ -85,10 +78,9 @@ class LabyrinthShopPolicy(
      *
      * 2026-11-01 request: in area 5 the coins cannot survive the run, so a dark refill button means
      * the remaining balance can only become score through goods the value gates below otherwise
-     * refuse. The clearance ladder runs after every normal buy decision and follows the coin cost
-     * per point: ★1/★2 relics (5.85–9.10) -> random imprint (9.00) -> ★3 relic (12.35) ->
-     * role-specific 选择 imprint (21.00). ★4 relics stay refused (32.5). Areas absent from this
-     * set keep the historical behaviour: buy what the gates allow, then close.
+     * refuse. This configurable set is retained for the historical flow. The incremental area-5
+     * branch has the explicit ladder ★1 -> random -> ★2 -> all-roster choice -> ★3 -> role choice,
+     * only while refresh is enabled/allowed and its button is confirmed unusable. ★4 stays refused.
      */
     private val clearanceArea: Set<Int> = setOf(5),
     /** Rarities the clearance ladder may still buy after the refill dies. */
@@ -104,8 +96,28 @@ class LabyrinthShopPolicy(
         relicPurchasesInCycle: Int = 0,
         refreshAvailabilityKnown: Boolean = true,
         refreshesUsedInVisit: Int = 0,
+        entryBalance: Int? = null,
+        currentBalance: Int? = null,
+        shelfScanComplete: Boolean = false,
+        visibleShelfComplete: Boolean = false,
     ): LabyrinthShopDecision {
         if (!buyRelics) return LabyrinthShopDecision.Close("策略已关闭商店购买，退出商店")
+        if (currentArea != null && currentArea in 3..5) {
+            return decideBudgetedShop(
+                currentArea = currentArea,
+                items = items,
+                acquired = acquired,
+                calibratedStacks = calibratedStacks,
+                refreshAvailable = refreshAvailable,
+                lockedFocus = lockedFocus,
+                refreshAvailabilityKnown = refreshAvailabilityKnown,
+                refreshesUsedInVisit = refreshesUsedInVisit,
+                entryBalance = entryBalance,
+                currentBalance = currentBalance,
+                shelfScanComplete = shelfScanComplete,
+                visibleShelfComplete = visibleShelfComplete,
+            )
+        }
         val refreshAllowed = refreshEnabled && currentArea != null && currentArea >= finalArea
         // The area budget is what keeps a shop from spending 300 coins on a refill that the
         // remaining balance cannot buy from. Running out of budget simply falls through to the
@@ -181,9 +193,9 @@ class LabyrinthShopPolicy(
             if (refreshPermitted && refreshAvailable) {
                 return LabyrinthShopDecision.Refresh(
                     if (visibleStockExhausted && relicPurchasesInCycle < relicsPerStockCycle) {
-                        "当前三个商品位均为职能印记，恢复为本轮三个遗物已售罄；按策略花300刷新下一轮遗物"
+                        "当前三个商品位均为职能印记，恢复为本轮三个遗物已售罄；按策略刷新下一轮遗物"
                     } else {
-                        "本轮前三个遗物已买完，按策略花300刷新下一轮遗物"
+                        "本轮前三个遗物已买完，按策略刷新下一轮遗物"
                     },
                 )
             }
@@ -297,7 +309,7 @@ class LabyrinthShopPolicy(
                 return LabyrinthShopDecision.Wait("当前商品行没有可购买遗物，等待刷新按钮稳定识别")
             }
             if (refreshAvailable) {
-                return LabyrinthShopDecision.Refresh("当前商品行没有可购买遗物，按策略花300刷新下一轮遗物")
+                return LabyrinthShopDecision.Refresh("当前商品行没有可购买遗物，按策略刷新下一轮遗物")
             }
         }
 
@@ -348,5 +360,202 @@ class LabyrinthShopPolicy(
                 else -> "区域${currentArea ?: "?"}当前无可确认遗物或可购买印记，结束商店"
             },
         )
+    }
+
+    private fun decideBudgetedShop(
+        currentArea: Int,
+        items: List<LabyrinthShopItemMatch>,
+        acquired: List<LabyrinthObservedRelic>,
+        calibratedStacks: Map<LabyrinthRelicMark, Int>,
+        refreshAvailable: Boolean,
+        lockedFocus: LabyrinthRelicMark?,
+        refreshAvailabilityKnown: Boolean,
+        refreshesUsedInVisit: Int,
+        entryBalance: Int?,
+        currentBalance: Int?,
+        shelfScanComplete: Boolean,
+        visibleShelfComplete: Boolean,
+    ): LabyrinthShopDecision {
+        val entry = entryBalance?.takeIf { it >= 0 }
+            ?: return LabyrinthShopDecision.Wait("区域${currentArea}入店金币尚未确认，拒绝按未确认金额购买")
+        if (currentArea == 4 && entry <= 10_000) {
+            return LabyrinthShopDecision.Close("区域4入店金币未超过10000，按策略保留金币")
+        }
+        val balance = currentBalance?.takeIf { it >= 0 }
+            ?: return LabyrinthShopDecision.Wait("区域${currentArea}当前金币尚未确认，等待金额识别")
+        if (currentArea == 4) {
+            // Entry selects the mode once. The last permitted purchase may finish below 8000.
+            if (balance < 8_000) {
+                return LabyrinthShopDecision.Close("区域4角色模式当前金币低于8000，停止购买并保留余款")
+            }
+        }
+
+        val successfulRefreshes = refreshesUsedInVisit.coerceAtLeast(0)
+        val refreshAllowed = refreshEnabled && currentArea >= finalArea && currentArea != 4
+        val refreshPermitted = refreshAllowed && (currentArea != 3 || successfulRefreshes < 2)
+        val clearance = currentArea == 5 && refreshAllowed &&
+            refreshAvailabilityKnown && !refreshAvailable
+        val safeAffordable = items.filter { item ->
+            item.purchasable && budgetedIdentityComplete(item) &&
+                item.priceCoins?.let { it > 0 && it <= balance } == true
+        }
+        val roleItems = safeAffordable.filter { item ->
+            item.kind == LabyrinthShopItemKind.ROLE_IMPRINT &&
+                rolePurchaseFitsBudget(currentArea, balance, requireNotNull(item.priceCoins), successfulRefreshes)
+        }
+        val skipRarities = skipRelicRaritiesByArea[currentArea].orEmpty()
+        var missingRelicMetadata: LabyrinthShopItemMatch? = null
+
+        fun buyRelic(rarity: Int): LabyrinthShopDecision.BuyRelic? {
+            val eligible = safeAffordable.filter { item ->
+                item.kind == LabyrinthShopItemKind.RELIC && item.relicMatch?.rarity == rarity &&
+                    acquired.none { it.relicId == item.relicMatch?.relicId }
+            }
+            if (eligible.isEmpty()) return null
+            val relicDecision = relicChoicePolicy.choose(
+                acquired = acquired,
+                candidates = eligible.mapNotNull(LabyrinthShopItemMatch::relicMatch),
+                calibratedStacks = calibratedStacks,
+                currentArea = currentArea,
+                lockedFocus = lockedFocus,
+            )
+            if (relicDecision == null) {
+                // An unreadable column must not hide another safe imprint / rarity on this row.
+                missingRelicMetadata = eligible.first()
+                return null
+            }
+            val item = eligible.first { it.relicMatch?.relicId == relicDecision.choice.relicId }
+            return LabyrinthShopDecision.BuyRelic(item, relicDecision)
+        }
+
+        fun buyImprint(predicate: (LabyrinthShopItemMatch) -> Boolean, reason: String): LabyrinthShopDecision.BuyRoleImprint? {
+            val item = roleItems.filter(predicate).minByOrNull { it.slotId } ?: return null
+            return LabyrinthShopDecision.BuyRoleImprint(item, requireNotNull(item.roleImprintLabel), reason)
+        }
+
+        if (currentArea == 4) {
+            // Preserve the original random-first form gate in role-only mode; never buy a relic.
+            val randomOnly = randomRoleImprintsOnlyByArea[currentArea] ?: false
+            val imprint = roleItems.filter { item ->
+                !randomOnly || item.imprintForm == LabyrinthShopImprintForm.RANDOM ||
+                    item.roleImprintLabel == ALL_CHOICE_IMPRINT
+            }.minWithOrNull(compareBy({ it.imprintForm == LabyrinthShopImprintForm.CHOICE }, { it.slotId }))
+            if (imprint != null) {
+                return LabyrinthShopDecision.BuyRoleImprint(
+                    imprint, requireNotNull(imprint.roleImprintLabel),
+                    "区域4入店金币超过10000且当前金币至少8000，按实际价格购买角色印记（允许最后一笔跌破8000）",
+                )
+            }
+        } else {
+            // Current safe goods win even if three relics were bought, a column is unresolved,
+            // or a lower shelf has not been seen. Neither counts nor imprint icons prove depletion.
+            if (1 !in skipRarities) buyRelic(1)?.let { return it }
+            buyImprint({ it.imprintForm == LabyrinthShopImprintForm.RANDOM },
+                "区域${currentArea}按实际价格与角色预算优先购买随机印记")?.let { return it }
+            if (2 !in skipRarities && (currentArea == 5 || entry > 14_000)) {
+                buyRelic(2)?.let { return it }
+            }
+
+            // Area 3 retains the old all-roster choice exception, but not role-specific choices.
+            // Unknown refill availability does not unlock this fallback while a refill is allowed.
+            val areaThreeFallback = currentArea == 3 &&
+                (!refreshPermitted || (refreshAvailabilityKnown && !refreshAvailable))
+            if (areaThreeFallback) {
+                buyImprint({ it.imprintForm == LabyrinthShopImprintForm.CHOICE &&
+                    it.roleImprintLabel == ALL_CHOICE_IMPRINT },
+                    "区域3本店无法继续刷新，按实际价格与角色预算购买原规则允许的全体选择印记")?.let { return it }
+            }
+
+            if (clearance) {
+                // Exact clearance ladder: ★1 -> random -> ★2 -> all-roster choice -> ★3 -> role choice.
+                buyImprint({ it.imprintForm == LabyrinthShopImprintForm.CHOICE &&
+                    it.roleImprintLabel == ALL_CHOICE_IMPRINT },
+                    "区域5刷新按钮已确认不可用，清仓购买全体选择印记")?.let { return it }
+                buyRelic(3)?.let { return it }
+                buyImprint({ it.imprintForm == LabyrinthShopImprintForm.CHOICE &&
+                    it.roleImprintLabel != ALL_CHOICE_IMPRINT },
+                    "区域5刷新按钮已确认不可用，清仓购买职能指定选择印记")?.let { return it }
+                // ★4 has no purchase path, including clearance and custom rarity-gate settings.
+            }
+        }
+
+        // Disabled buttons independently prove non-buyability. For every other live column,
+        // unresolved status/category/identity/price is missing evidence, never an empty shelf.
+        val unresolved = items.firstOrNull { item ->
+            item.status == LabyrinthShopItemStatus.UNKNOWN ||
+                (item.status != LabyrinthShopItemStatus.DISABLED &&
+                    (!budgetedIdentityComplete(item) || item.priceCoins?.let { it > 0 } != true))
+        }
+        if (unresolved != null) {
+            return LabyrinthShopDecision.Wait(
+                if (unresolved.kind == LabyrinthShopItemKind.ROLE_IMPRINT && unresolved.roleImprintLabel.isNullOrBlank()) {
+                    "${unresolved.slotId}职能印记的职能名尚未安全确认；不将识别失败当作无货，等待有限重读"
+                } else {
+                    "${unresolved.slotId}按钮、类别、身份或价格尚未安全确认；不将识别失败当作无货，等待有限重读"
+                },
+            )
+        }
+        missingRelicMetadata?.let {
+            return LabyrinthShopDecision.Wait("${it.slotId}遗物属性/层数元数据不足，等待确认；不据此浏览或刷新")
+        }
+        if (!visibleShelfComplete) {
+            return LabyrinthShopDecision.Wait("当前可见货架尚未充分观察，等待完整证据后再决定下探")
+        }
+        if (!shelfScanComplete) {
+            return LabyrinthShopDecision.Browse("当前可见货架已充分观察且无符合区域、预算与挑选规则的安全可买项，下探未观察货架")
+        }
+        if (refreshPermitted) {
+            if (!refreshAvailabilityKnown) {
+                return LabyrinthShopDecision.Wait("货架已完整观察且无安全可买项，等待刷新按钮确认")
+            }
+            if (refreshAvailable) {
+                return LabyrinthShopDecision.Refresh(
+                    if (currentArea == 3) {
+                        "区域3货架已完整观察且无安全可买项，刷新下一轮（本店已成功刷新${successfulRefreshes}次，最多2次）"
+                    } else {
+                        "区域5货架已完整观察且无安全可买项，继续刷新下一轮"
+                    },
+                )
+            }
+        }
+        return LabyrinthShopDecision.Close(
+            when {
+                currentArea == 4 -> "区域4货架已完整观察且无可买角色印记，不购买遗物、不刷新，退出商店"
+                currentArea == 3 && successfulRefreshes >= 2 -> "区域3本店两次成功刷新已用完，货架已完整观察且无安全可买项，退出商店"
+                !refreshEnabled -> "策略关闭刷新，货架已完整观察且无原规则允许的安全可买项，退出商店"
+                currentArea < finalArea -> "当前区域未达到刷新起始区域，货架已完整观察且无安全可买项，退出商店"
+                else -> "货架已完整观察且无安全可买项，刷新不可用，退出商店"
+            },
+        )
+    }
+
+    private fun budgetedIdentityComplete(item: LabyrinthShopItemMatch): Boolean {
+        if (!item.identitySafe || item.categoryState != LabyrinthShopCategoryState.READY) return false
+        return when (item.kind) {
+            LabyrinthShopItemKind.RELIC -> item.relicMatch?.let {
+                it.recognized && it.rarity in 1..4
+            } == true
+            LabyrinthShopItemKind.ROLE_IMPRINT -> !item.roleImprintLabel.isNullOrBlank() &&
+                item.imprintForm != LabyrinthShopImprintForm.UNKNOWN &&
+                (item.imprintForm != LabyrinthShopImprintForm.RANDOM ||
+                    (!item.choiceRoleImprint && item.roleImprintLabel != ALL_CHOICE_IMPRINT))
+            LabyrinthShopItemKind.UNKNOWN -> false
+        }
+    }
+
+    private fun rolePurchaseFitsBudget(area: Int, balance: Int, price: Int, successfulRefreshes: Int): Boolean {
+        if (price <= 0 || price > balance) return false
+        if (area == 4) return balance >= 8_000
+        if (area != 3) return true
+        val remaining = balance.toLong() - price.toLong()
+        return when (successfulRefreshes) {
+            0 -> remaining - 300L >= 7_620L
+            1 -> remaining - 600L >= 3_510L
+            else -> true
+        }
+    }
+
+    private companion object {
+        const val ALL_CHOICE_IMPRINT = "全体选择印记"
     }
 }

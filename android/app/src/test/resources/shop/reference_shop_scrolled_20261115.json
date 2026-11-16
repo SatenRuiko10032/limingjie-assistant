@@ -1,0 +1,85 @@
+{
+  "source": "reference-shop-scrolled-20261115-020820.png",
+  "description": "Manual transcription of the supplied screenshot, not an ML Kit result",
+  "width": 1280,
+  "height": 720,
+  "balanceText": "6,685",
+  "refreshText": "用300更新",
+  "thumbTop": 208,
+  "thumbBottom": 567,
+  "items": [
+    {
+      "column": 1,
+      "titleCropped": true,
+      "titleText": "",
+      "descriptionText": "能够从增益型职能中随机选出1人成为同伴。",
+      "priceText": "780",
+      "roleLabel": "增益型职能印记",
+      "status": "AVAILABLE",
+      "buyCenterY": 280,
+      "priceGlyphBounds": [
+        180,
+        267,
+        226,
+        289
+      ]
+    },
+    {
+      "column": 2,
+      "titleCropped": true,
+      "titleText": "",
+      "descriptionText": "能够从干扰型职能中随机选出1人成为同伴。",
+      "priceText": "780",
+      "roleLabel": "干扰型职能印记",
+      "status": "AVAILABLE",
+      "buyCenterY": 280,
+      "priceGlyphBounds": [
+        564,
+        267,
+        610,
+        289
+      ]
+    },
+    {
+      "column": 3,
+      "titleCropped": true,
+      "titleText": "",
+      "descriptionText": "能够从强化型职能中随机选出1人成为同伴。",
+      "priceText": "780",
+      "roleLabel": "强化型职能印记",
+      "status": "AVAILABLE",
+      "buyCenterY": 280,
+      "priceGlyphBounds": [
+        948,
+        267,
+        994,
+        289
+      ]
+    },
+    {
+      "column": 1,
+      "titleCropped": false,
+      "titleText": "再生之手镯",
+      "priceText": "1,170",
+      "status": "DISABLED",
+      "buyCenterY": 535
+    },
+    {
+      "column": 2,
+      "titleCropped": false,
+      "titleText": "魔封衣",
+      "priceText": "1,170",
+      "status": "DISABLED",
+      "buyCenterY": 535
+    },
+    {
+      "column": 3,
+      "titleCropped": false,
+      "titleText": "青辉之环",
+      "priceText": "1,170",
+      "status": "DISABLED",
+      "buyCenterY": 535
+    }
+  ],
+  "priceGlyphEvidence": "Half-open bounds include digit outline; dark RGB<105 cores measured (185,268)-(222,285), (569,268)-(606,285), (953,268)-(990,285). Each column has its own absolute coordinates."
+}

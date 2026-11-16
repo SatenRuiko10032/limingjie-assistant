@@ -1630,9 +1630,15 @@ class LabyrinthEntryRecognitionSession(
     private var plannedShopRefreshConfirmedAt = Long.MIN_VALUE
     @Volatile
     private var shopRelicPurchasesThisCycle = 0
-    /** 300-coin refills already paid for in the current shop node; cleared on every shop entry. */
+    /** Visually/payment-confirmed refills in the current shop node; never incremented by ACK. */
     @Volatile
     private var shopRefreshesThisVisit = 0
+    private val shopVisit = LabyrinthShopVisitState()
+    val shopEvidenceRequest: LabyrinthShopEvidenceRequest get() = shopVisit.evidenceRequest
+    private var plannedShopRefreshPrice: Int? = null
+    private var plannedShopRefreshBalance: Int? = null
+    private var plannedShopRefreshSignature: Long? = null
+    private var shopPurchaseBalanceCommitted = false
     @Volatile
     private var pendingRelicSelection: LabyrinthRelicMatch? = null
     @Volatile
@@ -2107,6 +2113,9 @@ class LabyrinthEntryRecognitionSession(
         plannedShopPurchaseCounted = false
         shopRelicPurchasesThisCycle = 0
         shopRefreshesThisVisit = 0
+        shopVisit.beginVisit(clock())
+        plannedShopRefreshPrice = null
+        plannedShopRefreshBalance = null
         pendingRelicSelection = null
         relicChoiceCommitted = false
         roleRewardChoiceCommitted = false
@@ -2211,6 +2220,7 @@ class LabyrinthEntryRecognitionSession(
     private suspend fun setPausedOnControl(paused: Boolean): Boolean = mutex.withLock {
         val sessionId = activeSessionId ?: return false
         if (!sessionManager.setPaused(sessionId, paused)) return false
+        if (!paused && _state.value.paused) shopVisit.invalidate(clock())
         nodeActionEvidence.invalidate()
         nodeConflictRecovery.reset()
         finalBossLocalizationStartedAt = Long.MIN_VALUE
@@ -2356,7 +2366,9 @@ class LabyrinthEntryRecognitionSession(
      * replace older waiting frames (latest-frame-wins), so an occasional expensive frame can add
      * at most one recognition-duration of latency instead of creating an unbounded stale queue.
      */
-    private fun balancedVisionSnapshot(frame: CapturedFrame) = LabyrinthBalancedVisionContext.RequestSnapshot(
+    private fun balancedVisionSnapshot(frame: CapturedFrame): LabyrinthBalancedVisionContext.RequestSnapshot {
+        val shopEvidence = shopEvidenceRequest
+        return LabyrinthBalancedVisionContext.RequestSnapshot(
         finalBossOnly = nodeSession?.directFinalBossTarget() != null,
         skipJoinedCharacters = skipRoleRewardJoinedRecognition,
         relicEvidenceVersion = relicEvidenceVersion,
@@ -2367,13 +2379,16 @@ class LabyrinthEntryRecognitionSession(
         rosterCharacterIds = rosterCharacterIds().toSet(),
         allowInitial1088GeometryRefinement = allowInitial1088GeometryRefinement(),
         lifecycleEpoch = lifecycleEpoch.get(), sceneEpoch = balancedSceneEpoch,
-    )
+        shopEvidenceEpoch = shopEvidence.epoch, shopEvidenceAfterMillis = shopEvidence.afterMillis,
+        )
+    }
 
     private fun balancedRequestCurrent(request: LabyrinthBalancedVisionContext.RequestSnapshot): Boolean =
         request.lifecycleEpoch == lifecycleEpoch.get() && request.sceneEpoch == balancedSceneEpoch &&
             request.finalBossOnly == (nodeSession?.directFinalBossTarget() != null) &&
             request.skipJoinedCharacters == skipRoleRewardJoinedRecognition &&
             request.relicEvidenceVersion == relicEvidenceVersion &&
+            request.shopEvidenceEpoch == shopEvidenceRequest.epoch &&
             request.rosterCharacterIds == rosterCharacterIds() &&
             request.allowInitial1088GeometryRefinement == allowInitial1088GeometryRefinement()
 
@@ -3289,11 +3304,15 @@ class LabyrinthEntryRecognitionSession(
         plannedShopRoleImprintLabel = null
         plannedShopPurchaseStartedAt = Long.MIN_VALUE
         plannedShopPurchaseCounted = false
+        shopPurchaseBalanceCommitted = false
     }
 
     private fun clearPlannedShopRefresh() {
         plannedShopRefreshStartedAt = Long.MIN_VALUE
         plannedShopRefreshConfirmedAt = Long.MIN_VALUE
+        plannedShopRefreshPrice = null
+        plannedShopRefreshBalance = null
+        plannedShopRefreshSignature = null
     }
 
     /** Restart login/entry navigation while retaining any already-loaded route progress. */
@@ -4124,6 +4143,20 @@ class LabyrinthEntryRecognitionSession(
         val previous = lastObservedPageState
         if (previous == pageState) return
         lastObservedPageState = pageState
+
+        if (pageState == LabyrinthEntryPageState.SHOP && previous != null &&
+            previous != LabyrinthEntryPageState.SHOP && shopVisit.active) {
+            // Includes manual purchases and long imprint pickers. Never restart ENTRY qualification.
+            shopVisit.invalidate(clock())
+        }
+
+        if (pageState == LabyrinthEntryPageState.SHOP_PURCHASE_COMPLETE &&
+            (plannedShopPurchaseRelicId != null || plannedShopRoleImprintLabel != null) &&
+            !shopPurchaseBalanceCommitted) {
+            shopVisit.purchaseCompleted(clock())
+            shopPurchaseBalanceCommitted = true
+            nodeLog("shop-purchase visualComplete=true currentBalance=INVALIDATED entryBalance=" + shopVisit.entryBalance)
+        }
 
         if (
             pageState == LabyrinthEntryPageState.SHOP_PURCHASE_COMPLETE &&
@@ -5040,9 +5073,191 @@ class LabyrinthEntryRecognitionSession(
         LabyrinthEntryPageState.RUN_CLEAR_CHEST_RESULT,
     )
 
+    /** Shop-local observation gate. Uses the existing action actor, never a separate swipe loop. */
+    private fun publishShopEvidenceGate(
+        sessionId: AutomationSessionId,
+        gate: LabyrinthShopEvidenceGate,
+    ): Boolean = when (gate) {
+        LabyrinthShopEvidenceGate.Ready -> false
+        is LabyrinthShopEvidenceGate.Wait -> {
+            if (activeSessionId == sessionId) {
+                _state.value = _state.value.copy(message = gate.reason)
+                overlayCoordinator.update(sessionId, buildOverlayPresentation(sessionId))
+            }
+            true
+        }
+        is LabyrinthShopEvidenceGate.Blocked -> {
+            nodeLog("shop-safety-stop reason=" + gate.reason, warning = true)
+            finishFromPlanner(sessionId, gate.reason + "；已停止，不点旧坐标或继续消费")
+            true
+        }
+    }
+
+    private fun handleShopEvidenceFrame(
+        sessionId: AutomationSessionId,
+        result: LabyrinthEntryFrameResult,
+        frameWidth: Int,
+        frameHeight: Int,
+        timestampMillis: Long,
+    ): Boolean {
+        if (!battleStrategySettingsSnapshot.buyRelics) return false
+        val shop = result.shopObservation ?: return publishShopEvidenceGate(
+            sessionId, shopVisit.waiting(timestampMillis, "等待商店观察结果"),
+        )
+        if (plannedShopPurchaseStartedAt != Long.MIN_VALUE) {
+            if (timestampMillis - plannedShopPurchaseStartedAt > SHOP_PURCHASE_TRANSITION_TIMEOUT_MILLIS) {
+                clearPlannedShopPurchase()
+                shopVisit.invalidate(clock())
+            }
+            return publishShopEvidenceGate(sessionId,
+                shopVisit.waiting(timestampMillis, "等待当前购买的实际结果或取消证据，不并发下一笔消费"))
+        }
+        val area = activeNodeArea ?: _state.value.routeProgress?.currentArea
+        val expanded = area in setOf(3, 4, 5)
+        val gate = shopVisit.observe(shop, timestampMillis, expanded)
+        if (publishShopEvidenceGate(sessionId, gate)) return true
+        val viewport = shop.viewport
+        if (expanded && viewport != null) {
+            if (shopVisit.returningToTop) {
+                if (viewport.atTop) {
+                    shopVisit.markScanFinishedAtTop(viewport)
+                    nodeLog("shop-return-top confirmed=true downAttempts=" + shopVisit.downAttempts)
+                } else {
+                    dispatchShopScroll(sessionId, LabyrinthShopScrollKind.TOP, viewport,
+                        frameWidth, frameHeight, timestampMillis)
+                    return true
+                }
+            }
+            if (!shopVisit.lowerScanStarted && !viewport.atTop) {
+                // A manually/resumed scrolled shop cannot be treated as the original first row.
+                dispatchShopScroll(sessionId, LabyrinthShopScrollKind.TOP, viewport,
+                    frameWidth, frameHeight, timestampMillis)
+                return true
+            }
+        }
+        val decision = currentShopDecision(result)
+        if (expanded && viewport != null && shopVisit.lowerScanStarted && !viewport.atTop &&
+            (decision is LabyrinthShopDecision.Close || decision is LabyrinthShopDecision.Refresh)) {
+            // Area 4 may hit its 8000 stop below the fold. Always verify return before exit/refill.
+            shopVisit.planReturnToTop()
+            dispatchShopScroll(sessionId, LabyrinthShopScrollKind.TOP, viewport,
+                frameWidth, frameHeight, timestampMillis)
+            return true
+        }
+        if (expanded && viewport != null && shopVisit.lowerScanStarted &&
+            !shopVisit.shelfScanComplete && !viewport.atTop &&
+            ((decision is LabyrinthShopDecision.BuyRoleImprint && decision.item.titleCropped) ||
+                (decision is LabyrinthShopDecision.Wait && shop.items.any { it.purchasable && it.titleCropped })) &&
+            shopVisit.canScroll(LabyrinthShopScrollKind.ADJUST)) {
+            dispatchShopScroll(sessionId, LabyrinthShopScrollKind.ADJUST, viewport,
+                frameWidth, frameHeight, timestampMillis)
+            return true
+        }
+        when (decision) {
+            is LabyrinthShopDecision.Browse -> {
+                if (viewport == null) return publishShopEvidenceGate(sessionId,
+                    shopVisit.waiting(timestampMillis, "下探前缺少可靠货架位置"))
+                if (viewport.atTop && viewport.atBottom && viewport.complete) {
+                    shopVisit.markScanFinishedAtTop(viewport)
+                    nodeLog("shop-scan singleViewport=true bothEdgesConfirmed=true")
+                } else if ((viewport.atBottom || shopVisit.bottomObserved) && shopVisit.lowerScanStarted) {
+                    shopVisit.planReturnToTop()
+                    if (viewport.atTop) shopVisit.markScanFinishedAtTop(viewport)
+                    else dispatchShopScroll(sessionId, LabyrinthShopScrollKind.TOP, viewport,
+                        frameWidth, frameHeight, timestampMillis)
+                } else if (shopVisit.canScroll(LabyrinthShopScrollKind.DOWN)) {
+                    dispatchShopScroll(sessionId, LabyrinthShopScrollKind.DOWN, viewport,
+                        frameWidth, frameHeight, timestampMillis)
+                } else {
+                    return publishShopEvidenceGate(sessionId, LabyrinthShopEvidenceGate.Blocked(
+                        "两次下探已用完，仍未取得可靠下排/底部扫描完成证据"))
+                }
+                return true
+            }
+            is LabyrinthShopDecision.Wait -> return publishShopEvidenceGate(
+                sessionId, shopVisit.waiting(timestampMillis, decision.reason),
+            )
+            is LabyrinthShopDecision.Refresh -> {
+                if (shop.refreshPriceReadingExhausted) return publishShopEvidenceGate(sessionId,
+                    LabyrinthShopEvidenceGate.Blocked("刷新售价有限重读仍未确认，不假定后续费用"))
+                val price = shop.refreshPriceCoins
+                if (price == null || shop.refreshPriceCapturedAtMillis <= shopEvidenceRequest.afterMillis) {
+                    return publishShopEvidenceGate(sessionId,
+                        shopVisit.waiting(timestampMillis, "等待当前刷新按钮的真实售价"))
+                }
+                if (price < 0 || (shopVisit.currentBalance ?: -1) < price) {
+                    return publishShopEvidenceGate(sessionId,
+                        LabyrinthShopEvidenceGate.Blocked("刷新按钮与当前余额/售价证据矛盾"))
+                }
+            }
+            else -> Unit
+        }
+        return false
+    }
+
+    private fun dispatchShopScroll(
+        sessionId: AutomationSessionId,
+        kind: LabyrinthShopScrollKind,
+        viewport: com.landosol.toolbox.labyrinth.vision.LabyrinthShopViewport,
+        frameWidth: Int,
+        frameHeight: Int,
+        timestampMillis: Long,
+    ) {
+        if (!shopVisit.canScroll(kind)) {
+            publishShopEvidenceGate(sessionId, LabyrinthShopEvidenceGate.Blocked("商店" + kind.name + "动作达到有限上限"))
+            return
+        }
+        val action = labyrinthShopScrollAction(kind, frameWidth, frameHeight) ?: run {
+            publishShopEvidenceGate(sessionId, LabyrinthShopEvidenceGate.Blocked("商店滑动视口尺寸不可用"))
+            return
+        }
+        if (!beginGuardedAction()) return
+        if (!shopVisit.beginScroll(kind, viewport, clock())) { endGuardedAction(); return }
+        val label = when (kind) {
+            LabyrinthShopScrollKind.DOWN -> "商店：首排已无符合规则可买项，有限下探"
+            LabyrinthShopScrollKind.ADJUST -> "商店：有限微调，优先露全印记标题"
+            LabyrinthShopScrollKind.TOP -> "商店：返回首排，等待视觉确认回顶"
+        }
+        traceAction(label)
+        lastPostEntryActionAt = timestampMillis
+        nodeLog("shop-scroll kind=" + kind + " down=" + shopVisit.downAttempts +
+            " adjust=" + shopVisit.adjustmentAttempts + " return=" + shopVisit.returnAttempts +
+            " originThumb=" + viewport.scrollThumbTop + " holdMillis=0")
+        launchGuardedAction(onSuppressed = { shopVisit.cancelUnsubmittedScroll(clock()) }) {
+            val executor = actionExecutor
+            val receipt = if (executor == null) AutomationActionResult.Rejected(action, "动作执行器不可用")
+                else executeBalancedAction(executor, sessionId, action)
+            if (activeSessionId != sessionId) return@launchGuardedAction
+            when (receipt) {
+                is AutomationActionResult.Executed -> {
+                    shopVisit.scrollReceipt(clock())
+                    lastPostEntryActionLandedAt = clock()
+                    val current = _state.value
+                    _state.value = current.copy(actionCount = current.actionCount + 1,
+                        lastActionLabel = label, message = label + "；系统回执已到，尚待真实位移与停稳")
+                    nodeLog("shop-scroll frameworkReceipt=true gameMovement=UNCONFIRMED kind=" + kind)
+                    overlayCoordinator.update(sessionId, buildOverlayPresentation(sessionId))
+                }
+                is AutomationActionResult.Rejected -> publishShopEvidenceGate(sessionId,
+                    LabyrinthShopEvidenceGate.Blocked("商店滑动被拒绝/终态未确认：" + receipt.reason))
+                AutomationActionResult.Paused, AutomationActionResult.StaleSession ->
+                    shopVisit.cancelUnsubmittedScroll(clock())
+                is AutomationActionResult.DryRun -> Unit
+            }
+        }
+    }
+
     private fun currentShopDecision(result: LabyrinthEntryFrameResult): LabyrinthShopDecision? {
         val shop = result.shopObservation ?: return null
         if (shop.dialogState != LabyrinthShopDialogState.NONE) return null
+        val request = shopEvidenceRequest
+        if (shop.evidenceEpoch != request.epoch || shop.capturedAtMillis <= request.afterMillis) {
+            return LabyrinthShopDecision.Wait("等待本次商店动作后的新证据")
+        }
+        val freshItems = shop.items.map { item ->
+            if (item.evidenceEpoch == request.epoch && item.evidenceCapturedAtMillis > request.afterMillis) item
+            else item.copy(identitySafe = false)
+        }
         val refreshAnchorReady = result.anchorMatches[EntryAnchorId.SHOP_REFRESH_BUTTON]
             ?.score
             ?.let { it >= POST_ENTRY_ANCHOR_MIN_SCORE }
@@ -5052,7 +5267,7 @@ class LabyrinthEntryRecognitionSession(
             // behind while the post-entry shop page is already visible, which previously caused
             // an area-4 shop to fall through into relic recognition and stop on missing metadata.
             currentArea = activeNodeArea ?: _state.value.routeProgress?.currentArea,
-            items = shop.items,
+            items = freshItems,
             acquired = _state.value.observedRelics,
             calibratedStacks = relicMarkStackCalibration,
             refreshAvailable = refreshAnchorReady && shop.refreshButtonEnabled,
@@ -5060,6 +5275,10 @@ class LabyrinthEntryRecognitionSession(
             relicPurchasesInCycle = shopRelicPurchasesThisCycle,
             refreshAvailabilityKnown = refreshAnchorReady,
             refreshesUsedInVisit = shopRefreshesThisVisit,
+            entryBalance = shopVisit.entryBalance,
+            currentBalance = shopVisit.currentBalance,
+            shelfScanComplete = shopVisit.shelfScanComplete && shop.viewport?.atTop == true,
+            visibleShelfComplete = shop.viewport?.complete == true,
         )
     }
 
@@ -6347,6 +6566,8 @@ class LabyrinthEntryRecognitionSession(
             )
             return
         }
+        if (pageState == LabyrinthEntryPageState.SHOP &&
+            handleShopEvidenceFrame(sessionId, result, frameWidth, frameHeight, timestampMillis)) return
         val postEntryActionInterval = if (characterAcquisitionActive) {
             CHARACTER_ACQUISITION_ACTION_INTERVAL_MILLIS
         } else {
@@ -6752,6 +6973,9 @@ class LabyrinthEntryRecognitionSession(
                     clearPlannedShopPurchase()
                     val rect = anchorRect(result, EntryAnchorId.SHOP_REFRESH_BUTTON)
                     if (rect != null) {
+                        plannedShopRefreshPrice = result.shopObservation?.refreshPriceCoins
+                        plannedShopRefreshBalance = shopVisit.currentBalance
+                        plannedShopRefreshSignature = result.shopObservation?.viewport?.signature
                         LabyrinthPostEntryTapPlan(LabyrinthPostEntryActionKind.SHOP_REFRESH, "刷新商店：${decision.reason}", rect)
                     } else {
                         shopWaitReason = "策略允许刷新，但刷新按钮没有达到安全识别线"
@@ -6768,6 +6992,11 @@ class LabyrinthEntryRecognitionSession(
                         shopWaitReason = "商店已无计划购买项，但关闭按钮未稳定识别"
                         null
                     }
+                }
+
+                is LabyrinthShopDecision.Browse -> {
+                    shopWaitReason = decision.reason
+                    null
                 }
 
                 is LabyrinthShopDecision.Wait -> {
@@ -8176,6 +8405,19 @@ class LabyrinthEntryRecognitionSession(
             plannedShopRoleImprintLabel = shopPurchaseRoleImprintLabel
             plannedShopPurchaseStartedAt = timestampMillis
         }
+        if (kind == LabyrinthPostEntryActionKind.SHOP_BUY_RELIC ||
+            kind == LabyrinthPostEntryActionKind.SHOP_BUY_IMPRINT ||
+            kind == LabyrinthPostEntryActionKind.SHOP_REFRESH) {
+            val origin = _state.value.lastResult?.shopObservation
+            val card = origin?.items?.firstOrNull { it.buyButtonRect == rect }
+            nodeLog("shop-spend-submit kind=" + kind + " entry=" + shopVisit.entryBalance +
+                " current=" + shopVisit.currentBalance + " price=" +
+                (if (kind == LabyrinthPostEntryActionKind.SHOP_REFRESH) plannedShopRefreshPrice else card?.priceCoins) +
+                " successfulRefreshes=" + shopVisit.successfulRefreshes + " epoch=" + shopEvidenceRequest.epoch +
+                " form=" + card?.imprintForm + " sourceCapturedAt=" + card?.evidenceCapturedAtMillis)
+            shopPurchaseBalanceCommitted = false
+            shopVisit.invalidate(clock())
+        }
         traceAction(label)
         resetPostEntryStall()
         postEntryAttempts++
@@ -8319,6 +8561,12 @@ class LabyrinthEntryRecognitionSession(
                     if (kind == LabyrinthPostEntryActionKind.SHOP_CONFIRM_IMPRINT) {
                         shopImprintRewardConfirmedAt = clock()
                     }
+                    if (kind == LabyrinthPostEntryActionKind.SHOP_CONFIRM_IMPRINT ||
+                        kind == LabyrinthPostEntryActionKind.SHOP_CONFIRM_RELIC ||
+                        kind == LabyrinthPostEntryActionKind.SHOP_BUY_IMPRINT ||
+                        kind == LabyrinthPostEntryActionKind.SHOP_BUY_RELIC) {
+                        shopVisit.invalidate(clock())
+                    }
                     when (kind) {
                         LabyrinthPostEntryActionKind.EX_CLOSE_DETAIL -> {
                             exSlot3ProbePending = false
@@ -8372,13 +8620,17 @@ class LabyrinthEntryRecognitionSession(
                             postEntryStableFrames = 0
                             postEntryAttempts = 0
                         }
-                        LabyrinthPostEntryActionKind.SHOP_CLOSE_PURCHASE_COMPLETE -> clearPlannedShopPurchase()
+                        LabyrinthPostEntryActionKind.SHOP_CLOSE_PURCHASE_COMPLETE -> {
+                            clearPlannedShopPurchase()
+                            shopVisit.purchaseCompleted(clock())
+                        }
                         LabyrinthPostEntryActionKind.SHOP_REFRESH -> {
                             // The refresh button opens a second confirmation dialog.  Keep the
                             // completed-cycle count until that dialog is confirmed and fresh shop
                             // stock is visible again.
-                            shopRefreshesThisVisit++
+                            // ACK is not a paid refill. The count advances only at the verified return below.
                             plannedShopRefreshStartedAt = clock()
+                            shopVisit.invalidate(clock())
                             plannedShopRefreshConfirmedAt = Long.MIN_VALUE
                             postEntryStableFrames = 0
                             postEntryAttempts = 0
@@ -8386,6 +8638,7 @@ class LabyrinthEntryRecognitionSession(
                         }
                         LabyrinthPostEntryActionKind.SHOP_CONFIRM_REFRESH -> {
                             plannedShopRefreshConfirmedAt = clock()
+                            shopVisit.invalidate(clock())
                             postEntryStableFrames = 0
                             postEntryAttempts = 0
                         }
@@ -9272,6 +9525,7 @@ class LabyrinthEntryRecognitionSession(
             // erase this counter, but a recovered movement dialog represents a real new node.
             shopRelicPurchasesThisCycle = 0
             shopRefreshesThisVisit = 0
+            shopVisit.beginVisit(clock())
             clearPlannedShopRefresh()
         }
         if (blockType == LabyrinthNodeTypes.BOSS) {
@@ -9314,13 +9568,8 @@ class LabyrinthEntryRecognitionSession(
         val elapsed = (timestampMillis - startedAt).coerceAtLeast(0L)
         if (elapsed > SHOP_REFRESH_TRANSITION_TIMEOUT_MILLIS) {
             clearPlannedShopRefresh()
-            if (activeSessionId == sessionId) {
-                _state.value = _state.value.copy(
-                    message = "商店刷新确认超时；未重置本轮遗物计数，等待重新识别商店",
-                )
-                overlayCoordinator.update(sessionId, buildOverlayPresentation(sessionId))
-            }
-            return false
+            finishFromPlanner(sessionId, "商店刷新在限定时间内未取得成交余额/新货架证据；不计成功、不重试连续消费")
+            return true
         }
 
         val confirmation = result.nodeMoveConfirmation
@@ -9364,12 +9613,33 @@ class LabyrinthEntryRecognitionSession(
                     timeoutMillis = SHOP_REFRESH_TRANSITION_TIMEOUT_MILLIS,
                 )
             ) {
-                shopRelicPurchasesThisCycle = 0
+                val shop = result.shopObservation
+                if (shop == null) return publishShopEvidenceGate(sessionId,
+                    shopVisit.waiting(timestampMillis, "刷新确认后等待新货架观察"))
+                val area = activeNodeArea ?: _state.value.routeProgress?.currentArea
+                val gate = shopVisit.observe(shop, timestampMillis, area in setOf(3, 4, 5))
+                if (publishShopEvidenceGate(sessionId, gate)) return true
+                if (!labyrinthShopRefreshPaymentConfirmed(plannedShopRefreshBalance,
+                        plannedShopRefreshPrice, shopVisit.currentBalance,
+                        plannedShopRefreshSignature, shop.viewport?.signature)) {
+                    return publishShopEvidenceGate(sessionId,
+                        shopVisit.waiting(timestampMillis, "刷新回到货架，但新余额尚未核对真实刷新费用；不提前计成功"))
+                }
+                val before = plannedShopRefreshBalance
+                val paid = plannedShopRefreshPrice
+                val after = shopVisit.currentBalance
+                if (shopVisit.refreshCompleted(startedAt, clock())) {
+                    shopRefreshesThisVisit = shopVisit.successfulRefreshes
+                    shopRelicPurchasesThisCycle = 0
+                }
                 clearPlannedShopRefresh()
                 postEntryStableFrames = 0
                 postEntryAttempts = 0
+                nodeLog("shop-refresh visualCommit=true paid=" + paid + " before=" + before +
+                    " after=" + after + " successful=" + shopRefreshesThisVisit +
+                    " entryBalance=" + shopVisit.entryBalance)
                 if (activeSessionId == sessionId) {
-                    _state.value = _state.value.copy(message = "商店已刷新，等待新商品列表稳定")
+                    _state.value = _state.value.copy(message = "商店刷新成交已核对，等待本轮新余额与商品稳定")
                     overlayCoordinator.update(sessionId, buildOverlayPresentation(sessionId))
                 }
                 return true
@@ -9382,7 +9652,7 @@ class LabyrinthEntryRecognitionSession(
         }
 
         if (activeSessionId == sessionId) {
-            _state.value = _state.value.copy(message = "已点击用300更新，等待更新确认弹窗")
+            _state.value = _state.value.copy(message = "已点击商店更新，等待确认弹窗（尚未计成功）")
             overlayCoordinator.update(sessionId, buildOverlayPresentation(sessionId))
         }
         return true
@@ -10369,6 +10639,7 @@ class LabyrinthEntryRecognitionSession(
                                             decision.relicDecision.reason
                                     is LabyrinthShopDecision.BuyRoleImprint ->
                                         "购买${decision.label} · ${decision.reason}"
+                                    is LabyrinthShopDecision.Browse -> "浏览 · ${decision.reason}"
                                     is LabyrinthShopDecision.Refresh -> "刷新 · ${decision.reason}"
                                     is LabyrinthShopDecision.Close -> "关闭 · ${decision.reason}"
                                     is LabyrinthShopDecision.Wait -> "等待 · ${decision.reason}"
@@ -11040,7 +11311,7 @@ class LabyrinthEntryRecognitionSession(
 
         /** 确认弹窗关闭后至少等这么久，才允许把「商店 + 无弹窗」当成取消（购买完成弹窗可能晚到）。 */
         const val SHOP_CONFIRM_CANCEL_GRACE_MILLIS = 2_000L
-        const val SHOP_REFRESH_TRANSITION_TIMEOUT_MILLIS = 8_000L
+        const val SHOP_REFRESH_TRANSITION_TIMEOUT_MILLIS = 45_000L
         const val SHOP_REFRESH_SETTLE_MILLIS = 500L
         const val CHARACTER_ACQUISITION_ACTION_INTERVAL_MILLIS = 650L
         const val NODE_MAP_SETTLE_AFTER_POST_ACTION_MILLIS = 2_000L

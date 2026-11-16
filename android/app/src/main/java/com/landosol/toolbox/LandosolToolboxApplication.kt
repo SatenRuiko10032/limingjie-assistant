@@ -304,7 +304,17 @@ class LandosolToolboxApplication : Application() {
                         val snapshot = com.landosol.toolbox.labyrinth.LabyrinthBalancedVisionContext.current()
                         if (snapshot != null) snapshot.allowInitial1088GeometryRefinement else labyrinthEntryRecognitionSession.allowInitial1088GeometryRefinement()
                     },
-                )::process
+                ).let { processor ->
+                    { frame: com.landosol.toolbox.automation.capture.CapturedFrame ->
+                        val snapshot = com.landosol.toolbox.labyrinth.LabyrinthBalancedVisionContext.current()
+                        val evidence = if (snapshot != null) {
+                            com.landosol.toolbox.labyrinth.LabyrinthShopEvidenceRequest(
+                                snapshot.shopEvidenceEpoch, snapshot.shopEvidenceAfterMillis,
+                            )
+                        } else labyrinthEntryRecognitionSession.shopEvidenceRequest
+                        processor.process(frame, evidence.epoch, evidence.afterMillis)
+                    }
+                }
             },
             fastProcessorFactory = {
                 val observer = com.landosol.toolbox.labyrinth.vision.AndroidLabyrinthFastFrameObserver.create(

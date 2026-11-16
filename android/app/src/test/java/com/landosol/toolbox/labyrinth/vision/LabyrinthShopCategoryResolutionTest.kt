@@ -9,15 +9,16 @@ import com.landosol.toolbox.clanbattle.recognition.PixelImage
 import kotlinx.serialization.json.*
 
 class LabyrinthShopCategoryResolutionTest {
-    @Test fun `logged screenshot and OCR readings classify all three imprints against packaged relic catalog`() {
+    @Test fun `logged screenshot classifies imprints before scoped price authorization and area budgeting`() {
         val root = generateSequence(File(".").canonicalFile, File::getParentFile)
             .first { File(it, "android/app/src/test/resources/shop/imprints-20260914.jpg").isFile }
         val resources = File(root, "android/app/src/main/assets/resource-packs/cn-bilibili")
         val templates = File(resources, "icons/relics").listFiles()!!.filter { it.extension == "png" }.map {
             LabyrinthRelicTemplate(it.nameWithoutExtension, it.nameWithoutExtension, "弱体", "1", "", readImage(it))
         }
+        val frame = readImage(File(root, "android/app/src/test/resources/shop/imprints-20260914.jpg"))
         val raw = LabyrinthShopRecognizer(readImage(File(resources, "vision/shop/shop_buy_button.png")), templates)
-            .recognize(readImage(File(root, "android/app/src/test/resources/shop/imprints-20260914.jpg")))
+            .recognize(frame)
         val log = Json.parseToJsonElement(File(root, "android/app/src/test/resources/shop/imprints-20260914.json").readText()).jsonObject
         val titles = log.getValue("items").jsonArray.map { it.jsonObject.getValue("titleText").jsonPrimitive.content }
         assertEquals(3, raw.items.size)
@@ -25,7 +26,28 @@ class LabyrinthShopCategoryResolutionTest {
         val classified = raw.items.mapIndexed { i, item -> resolver.resolve(item, titles[i], i.toLong(), 0) }
         assertTrue(classified.all { it.kind == LabyrinthShopItemKind.ROLE_IMPRINT && it.relicMatch == null })
         assertEquals("增益型职能印记", classified[2].roleImprintLabel)
-        assertTrue(decide(classified) is LabyrinthShopDecision.BuyRoleImprint)
+        // Legacy title classification alone is not a new-area price/identity receipt.
+        assertTrue(classified.none { it.identitySafe })
+        for (area in 1..2) assertTrue(legacyDecide(classified, area) is LabyrinthShopDecision.BuyRoleImprint)
+        for (area in listOf(3, 5)) assertTrue(decide(classified, area, entryBalance = 4_890,
+            currentBalance = 4_890, shelfScanComplete = false) is LabyrinthShopDecision.Wait)
+
+        // This saved screenshot actually shows 900 on all three cards and a current balance of 4890.
+        val confirmed = raw.items.mapIndexed { i, card ->
+            val fingerprint = ShopViewport.fingerprint(frame,
+                listOfNotNull(card.titleRect, card.descriptionRect, card.iconRect, card.priceRect) + card.buyButtonRect)
+            scoped(card, "900", title = titles[i], fingerprint = fingerprint)
+        }
+        assertTrue(confirmed.all { it.identitySafe && it.imprintForm == LabyrinthShopImprintForm.RANDOM })
+        assertTrue(confirmed.all { it.kind == LabyrinthShopItemKind.ROLE_IMPRINT && it.relicMatch == null })
+        assertTrue(confirmed.all { it.priceCoins == 900 && it.evidenceEpoch == 7L && it.evidenceCapturedAtMillis == 501L })
+        assertEquals("增益型职能印记", confirmed[2].roleImprintLabel)
+        assertTrue(raw.viewport?.complete == true)
+        assertTrue(decide(confirmed, area = 5, entryBalance = 4_890, currentBalance = 4_890,
+            shelfScanComplete = false, visibleShelfComplete = raw.viewport?.complete == true) is LabyrinthShopDecision.BuyRoleImprint)
+        // Area 3's zero-refill reserve cannot spend this balance: inspect the lower shelf, not infer no stock.
+        assertTrue(decide(confirmed, area = 3, entryBalance = 4_890, currentBalance = 4_890,
+            shelfScanComplete = false, visibleShelfComplete = raw.viewport?.complete == true) is LabyrinthShopDecision.Browse)
     }
 
     private fun readImage(file: File): PixelImage {
@@ -45,10 +67,53 @@ class LabyrinthShopCategoryResolutionTest {
         id, rect, rect, 0.99, 1.0, LabyrinthShopItemStatus.AVAILABLE,
         relicMatch = LabyrinthRelicMatch(slotId = id, relicId = if (recognized) "40005" else null,
             displayName = "候选遗物", attribute = "弱体", attributeBonus = "1", effect = null,
-            confidence = 0.715, screenRect = rect, iconRect = rect, rivalMargin = 0.000338),
+            confidence = 0.715, screenRect = rect, iconRect = rect, rivalMargin = 0.000338,
+            rarity = if (recognized) 1 else 0),
     )
-    private fun decide(items: List<LabyrinthShopItemMatch>, area: Int = 3, purchased: Int = 0) =
-        LabyrinthShopPolicy().decide(area, items, emptyList(), refreshAvailable = true, relicPurchasesInCycle = purchased)
+
+    // Simulated same-card OCR receipt. Safety is established by Scoped, never by copying identitySafe=true.
+    private fun scoped(
+        item: LabyrinthShopItemMatch,
+        priceText: String,
+        title: String? = item.titleText,
+        fingerprint: Long = item.slotId.hashCode().toLong(),
+    ): LabyrinthShopItemMatch {
+        val evidence = ShopRecognitionScoped.Evidence(
+            epoch = 7, capturedAtMillis = 501, fingerprint = fingerprint,
+            readId = item.titleEvidenceId ?: 1L,
+            sections = ShopRecognitionScoped.Sections(title.orEmpty(), "", priceText), iconRoleLabel = null,
+        )
+        return ShopRecognitionScoped.resolve(
+            item, evidence, epoch = 7, afterMillis = 500, currentFingerprint = fingerprint,
+            attempts = item.categoryAttempt, exhausted = item.categoryState == LabyrinthShopCategoryState.EXHAUSTED,
+        )
+    }
+
+    private fun decide(
+        items: List<LabyrinthShopItemMatch>,
+        area: Int = 3,
+        purchased: Int = 0,
+        refreshAvailable: Boolean = true,
+        entryBalance: Int? = 20_000,
+        currentBalance: Int? = 20_000,
+        shelfScanComplete: Boolean = true,
+        visibleShelfComplete: Boolean = true,
+        policy: LabyrinthShopPolicy = LabyrinthShopPolicy(),
+    ) = policy.decide(
+        area, items, emptyList(), refreshAvailable = refreshAvailable, relicPurchasesInCycle = purchased,
+        entryBalance = entryBalance, currentBalance = currentBalance,
+        shelfScanComplete = shelfScanComplete, visibleShelfComplete = visibleShelfComplete,
+    )
+
+    private fun legacyDecide(
+        items: List<LabyrinthShopItemMatch>,
+        area: Int,
+        purchased: Int = 0,
+        policy: LabyrinthShopPolicy = LabyrinthShopPolicy(),
+    ): LabyrinthShopDecision {
+        require(area in 1..2)
+        return policy.decide(area, items, emptyList(), refreshAvailable = true, relicPurchasesInCycle = purchased)
+    }
 
     @Test fun `title classification overrides even a recognized relic icon`() {
         val result = resolver.resolve(item(recognized = true), "增益型识能的随机印记", 22, 0)
@@ -57,9 +122,28 @@ class LabyrinthShopCategoryResolutionTest {
         assertNull(result.relicMatch)
     }
 
-    @Test fun `relic cannot be bought until its title was checked`() {
-        assertTrue(decide(listOf(resolver.resolve(item(recognized = true), null, null, 0))) is LabyrinthShopDecision.Wait)
-        assertTrue(decide(listOf(resolver.resolve(item(recognized = true), "候选遗物", 1, 0))) is LabyrinthShopDecision.BuyRelic)
+    @Test fun `relic needs checked title scoped price identity and confirmed new-area balances`() {
+        val unread = resolver.resolve(item(recognized = true), null, null, 0)
+        val checked = resolver.resolve(item(recognized = true), "候选遗物", 1, 0)
+        assertEquals(LabyrinthShopCategoryState.READING, unread.categoryState)
+        assertEquals(LabyrinthShopCategoryState.READY, checked.categoryState)
+        assertEquals(LabyrinthShopItemKind.RELIC, checked.kind)
+        assertFalse(checked.identitySafe)
+        val confirmed = scoped(checked, "585")
+        assertTrue(confirmed.identitySafe)
+        assertEquals(585, confirmed.priceCoins)
+        assertEquals(LabyrinthShopItemKind.RELIC, confirmed.kind)
+        for (area in listOf(3, 5)) {
+            assertTrue(decide(listOf(unread), area) is LabyrinthShopDecision.Wait)
+            assertTrue(decide(listOf(checked), area) is LabyrinthShopDecision.Wait)
+            assertTrue(decide(listOf(confirmed), area) is LabyrinthShopDecision.BuyRelic)
+            assertTrue(decide(listOf(confirmed), area, entryBalance = null) is LabyrinthShopDecision.Wait)
+            assertTrue(decide(listOf(confirmed), area, currentBalance = null) is LabyrinthShopDecision.Wait)
+        }
+        for (area in 1..2) {
+            assertTrue(legacyDecide(listOf(unread), area) is LabyrinthShopDecision.Wait)
+            assertTrue(legacyDecide(listOf(checked), area) is LabyrinthShopDecision.BuyRelic)
+        }
     }
 
     @Test fun `variant advances on completed OCR, not on elapsed time`() {
@@ -101,12 +185,29 @@ class LabyrinthShopCategoryResolutionTest {
         assertEquals(1, resolver.attempt("s", 7, 50_000))
     }
 
-    @Test fun `three completed unresolved reads skip item without assuming exhausted relic stock`() {
+    @Test fun `exhausted identity never proves empty stock while another safe imprint remains buyable`() {
         val imprint = resolver.resolve(item("1"), "攻击型职能的随机印记", 1, 0)
-        assertTrue(decide(listOf(imprint, resolver.resolve(item(), "看不清", 2, 0))) is LabyrinthShopDecision.Wait)
-        val skipped = resolver.resolve(item(), "看不清", 4, 3)
-        assertTrue(decide(listOf(imprint, skipped), area = 5) is LabyrinthShopDecision.BuyRoleImprint)
-        assertTrue(decide(listOf(skipped), area = 5) is LabyrinthShopDecision.Close)
+        val safeImprint = scoped(imprint, "780")
+        val reading = scoped(resolver.resolve(item(), "看不清", 2, 0), "780")
+        val skipped = scoped(resolver.resolve(item(), "看不清", 4, 3), "780")
+        assertTrue(safeImprint.identitySafe)
+        assertEquals(LabyrinthShopImprintForm.RANDOM, safeImprint.imprintForm)
+        assertEquals(LabyrinthShopCategoryState.READING, reading.categoryState)
+        assertEquals(LabyrinthShopCategoryState.EXHAUSTED, skipped.categoryState)
+        assertEquals(LabyrinthShopItemKind.UNKNOWN, skipped.kind)
+        assertFalse(skipped.identitySafe)
+        assertEquals(780, skipped.priceCoins) // missing identity, not missing amount/price
+        for (area in listOf(3, 5)) {
+            assertTrue(decide(listOf(safeImprint, reading), area) is LabyrinthShopDecision.BuyRoleImprint)
+            assertTrue(decide(listOf(safeImprint, skipped), area) is LabyrinthShopDecision.BuyRoleImprint)
+            assertTrue(decide(listOf(reading), area) is LabyrinthShopDecision.Wait)
+            assertTrue(decide(listOf(skipped), area) is LabyrinthShopDecision.Wait)
+        }
+        for (area in 1..2) {
+            assertTrue(legacyDecide(listOf(imprint, reading), area) is LabyrinthShopDecision.Wait)
+            assertTrue(legacyDecide(listOf(imprint, skipped), area) is LabyrinthShopDecision.BuyRoleImprint)
+            assertTrue(legacyDecide(listOf(skipped), area) is LabyrinthShopDecision.Close)
+        }
     }
 
     /**
@@ -131,16 +232,50 @@ class LabyrinthShopCategoryResolutionTest {
         assertTrue(resolver.labelGraceOpen("3", 20_000))
     }
 
-    @Test fun `remaining titles finish bounded reading after third relic purchase`() {
-        assertTrue(decide(listOf(resolver.resolve(item(), null, null, 0)), purchased = 3) is LabyrinthShopDecision.Wait)
-        assertTrue(decide(listOf(resolver.resolve(item(), null, null, 3)), purchased = 3) is LabyrinthShopDecision.Close)
+    @Test fun `committed relic count never bypasses reading or exhausted identity in new areas`() {
+        val reading = scoped(resolver.resolve(item(), null, null, 0), "780")
+        val exhausted = scoped(resolver.resolve(item(), null, null, 3), "780")
+        assertEquals(LabyrinthShopCategoryState.READING, reading.categoryState)
+        assertEquals(LabyrinthShopCategoryState.EXHAUSTED, exhausted.categoryState)
+        assertFalse(reading.identitySafe)
+        assertFalse(exhausted.identitySafe)
+        assertEquals(780, reading.priceCoins)
+        assertEquals(780, exhausted.priceCoins)
+        val recovered = scoped(resolver.resolve(item(), "治疗型职能的随机印记", 4, 0), "780")
+        assertTrue(recovered.identitySafe)
+        for (area in listOf(3, 5)) {
+            assertTrue(decide(listOf(reading), area, purchased = 3) is LabyrinthShopDecision.Wait)
+            assertTrue(decide(listOf(exhausted), area, purchased = 3) is LabyrinthShopDecision.Wait)
+            assertTrue(decide(listOf(recovered), area, purchased = 3) is LabyrinthShopDecision.BuyRoleImprint)
+        }
+        for (area in 1..2) {
+            assertTrue(legacyDecide(listOf(reading), area, purchased = 3) is LabyrinthShopDecision.Wait)
+            assertTrue(legacyDecide(listOf(exhausted), area, purchased = 3) is LabyrinthShopDecision.Close)
+        }
     }
 
-    @Test fun `three imprints recover stock and follow area refresh rules`() {
-        val items = listOf("攻击型职能的随机印记", "治疗型职能的随机印记", "增益型识能的随机印记")
+    @Test fun `three safe imprints buy before refresh without inferring relic depletion in new areas`() {
+        val classified = listOf("攻击型职能的随机印记", "治疗型职能的随机印记", "增益型识能的随机印记")
             .mapIndexed { i, title -> resolver.resolve(item(i.toString()), title, i.toLong(), 0) }
-        assertTrue(decide(items, 3) is LabyrinthShopDecision.BuyRoleImprint)
-        assertTrue(decide(items, 5) is LabyrinthShopDecision.Refresh)
+        assertTrue(classified.all { it.categoryState == LabyrinthShopCategoryState.READY &&
+            it.kind == LabyrinthShopItemKind.ROLE_IMPRINT && it.relicMatch == null })
+        val prices = listOf("780", "900", "1170")
+        val confirmed = classified.mapIndexed { i, card -> scoped(card, prices[i]) }
+        assertTrue(confirmed.all { it.identitySafe && it.imprintForm == LabyrinthShopImprintForm.RANDOM })
+        assertEquals(listOf(780, 900, 1170), confirmed.map { it.priceCoins })
+        for (area in listOf(3, 5)) {
+            assertTrue(decide(classified, area) is LabyrinthShopDecision.Wait)
+            for (purchased in listOf(0, 3)) {
+                val decision = decide(confirmed, area, purchased) as LabyrinthShopDecision.BuyRoleImprint
+                assertEquals("0", decision.item.slotId)
+                assertFalse(decision.opensRolePicker)
+            }
+        }
+        for (area in 1..2) {
+            assertTrue(legacyDecide(classified, area) is LabyrinthShopDecision.BuyRoleImprint)
+            // The original stock-cycle recovery remains confined to the original 1/2 flow.
+            assertTrue(legacyDecide(classified, area, policy = LabyrinthShopPolicy(finalArea = 1)) is LabyrinthShopDecision.Refresh)
+        }
     }
 
     /**
@@ -148,28 +283,43 @@ class LabyrinthShopCategoryResolutionTest {
      * Both grant a character of the named class, but the choice variant costs more than twice as
      * much and opens a full-roster picker the run then has to answer, so the random one wins.
      */
-    @Test fun `a random imprint is preferred over the pricier choice imprint`() {
-        val choice = resolver.resolve(item("1"), "破防型职能的选择印记", 1, 0)
-        val random = resolver.resolve(item("2"), "坦克型职能的随机印记", 2, 0)
-        assertTrue(choice.choiceRoleImprint)
-        assertFalse(random.choiceRoleImprint)
+    @Test fun `random before choice respects scoped prices new refresh clearance and legacy forms`() {
+        val classifiedChoice = resolver.resolve(item("1"), "破防型职能的选择印记", 1, 0)
+        val classifiedRandom = resolver.resolve(item("2"), "坦克型职能的随机印记", 2, 0)
+        assertTrue(classifiedChoice.choiceRoleImprint)
+        assertFalse(classifiedRandom.choiceRoleImprint)
+        val choice = scoped(classifiedChoice, "1,820")
+        val random = scoped(classifiedRandom, "780")
+        assertTrue(choice.identitySafe && random.identitySafe)
+        assertEquals(LabyrinthShopImprintForm.CHOICE, choice.imprintForm)
+        assertEquals(LabyrinthShopImprintForm.RANDOM, random.imprintForm)
+        assertEquals(1_820, choice.priceCoins)
+        assertEquals(780, random.priceCoins)
 
-        // Listed choice-first, the random one must still be the purchase.
-        val preferred = decide(listOf(choice, random), area = 5) as LabyrinthShopDecision.BuyRoleImprint
-        assertEquals("2", preferred.item.slotId)
-        assertFalse(preferred.opensRolePicker)
+        // Listed choice-first, the current random purchase still precedes both it and refresh.
+        for (area in listOf(3, 5)) {
+            val preferred = decide(listOf(choice, random), area) as LabyrinthShopDecision.BuyRoleImprint
+            assertEquals("2", preferred.item.slotId)
+            assertFalse(preferred.opensRolePicker)
+        }
+        assertTrue("area 3 never buys a role-specific choice imprint",
+            decide(listOf(choice), area = 3) is LabyrinthShopDecision.Close)
+        assertTrue("area 5 refreshes only after confirmed complete stock has no normal buy",
+            decide(listOf(choice), area = 5) is LabyrinthShopDecision.Refresh)
+        val clearance = decide(listOf(choice), area = 5, refreshAvailable = false) as LabyrinthShopDecision.BuyRoleImprint
+        assertEquals("1", clearance.item.slotId)
+        assertTrue(clearance.opensRolePicker)
+        assertTrue("manual refresh disabling must not unlock choice clearance",
+            decide(listOf(choice), area = 5, refreshAvailable = false,
+                policy = LabyrinthShopPolicy(refreshEnabled = false)) is LabyrinthShopDecision.Close)
 
-        // 2026-11-01 rule: inside areas 3/5 a role-specific 选择 imprint is skipped outright
-        // (随机 780 against 选择 1,820 for the same class), so a lone choice imprint ends the visit.
-        assertTrue("area 5 must skip a lone choice imprint",
-            decide(listOf(choice), area = 5) is LabyrinthShopDecision.Close)
-        // Areas without the imprint gate keep the old fallback behaviour.
-        val fallback = decide(listOf(choice), area = 2) as LabyrinthShopDecision.BuyRoleImprint
-        assertEquals("1", fallback.item.slotId)
-        assertTrue(fallback.opensRolePicker)
-
-        // Among equals the leftmost slot keeps the pick deterministic.
-        val second = resolver.resolve(item("3"), "坦克型职能的随机印记", 3, 0)
+        // Original areas continue to accept the legacy category receipt without the new monetary fields.
+        for (area in 1..2) {
+            val fallback = legacyDecide(listOf(classifiedChoice), area) as LabyrinthShopDecision.BuyRoleImprint
+            assertEquals("1", fallback.item.slotId)
+            assertTrue(fallback.opensRolePicker)
+        }
+        val second = scoped(resolver.resolve(item("3"), "坦克型职能的随机印记", 3, 0), "780")
         val tie = decide(listOf(second, random), area = 5) as LabyrinthShopDecision.BuyRoleImprint
         assertEquals("2", tie.item.slotId)
     }
