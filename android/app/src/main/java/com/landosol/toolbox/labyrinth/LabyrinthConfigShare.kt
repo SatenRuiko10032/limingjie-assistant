@@ -12,6 +12,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.decodeFromJsonElement
@@ -31,6 +32,7 @@ data class LabyrinthSharedConfiguration(
     val strategy: LabyrinthStrategySettings? = null,
     val personalScores: Map<String, Int>? = null,
     val reroll: LabyrinthRerollSettings? = null,
+    val ignoredFieldsByModule: Map<LabyrinthConfigModule, Set<String>> = emptyMap(),
 ) {
     val modules: Set<LabyrinthConfigModule> get() = buildSet {
         if (strategy != null) add(LabyrinthConfigModule.STRATEGY)
@@ -77,6 +79,31 @@ object LabyrinthConfigShareCodec {
     const val MAX_JSON_BYTES = 524_288
     private const val MAX_DEPTH = 16
     private const val MAX_SCORES = 2_048
+    private const val MAX_UNKNOWN_FIELDS = 64
+    // Keep these wire requirements fixed when adding settings with defaults.
+    private val REQUIRED_V1_STRATEGY_KEYS = setOf(
+        "playerWeight", "damageWeight", "survivalWeight", "functionWeight", "formationWeight", "cohesionWeight",
+        "attributePairingBonusEnabled", "duplicateRolePenalty", "mixedDamagePenalty", "effectiveCharacterSystemBonus",
+        "secondTeamWeight", "thirdTeamWeight", "bossTeamMode", "preferPureBossDamageSystem",
+        "singleBossFallbackToMultiAfterThreeFailures", "singleBossRetryCountBeforeMulti", "rerollAfterThreeBattleFailures",
+        "baselineLastArea", "baselineTarget", "debuffPivotMinimum", "debuffPivotTolerance", "buyRelics", "refreshShop",
+        "refreshFromArea", "normalWinRate", "extremeWinRate", "eventCustomizationEnabled", "eventChoiceOverrides",
+        "openingRosters", "relicMarkPriority", "specialEquipmentMode", "specialEquipmentKinds", "responseIntervalMillis",
+    )
+    private val REQUIRED_V1_REROLL_KEYS = setOf(
+        "guildId", "difficulty", "perfectStart", "routeEvaluationMode", "valueAllowance", "thirdBlockChoice",
+        "area3BossIds", "area5BossIds", "maxAttempts", "rerollUntilFound", "retireExisting",
+    )
+    private val REQUIRED_V1_CUSTOM_NODE_KEYS = setOf(
+        "area1Column3", "area1Column5", "area2Columns2And6", "area3Column4", "area4Column2", "area4Column7", "thirdBlockChoice",
+    )
+    private val FORBIDDEN_FIELDS = setOf(
+        "personalrolescores", "accountid", "credentialkey", "password", "loginid", "gameuid",
+        "token", "cookie", "accesskey", "credentials", "apikey", "accesstoken", "refreshtoken", "secretkey",
+        "batchid", "completedcount", "targetcount",
+    )
+    private val FIELD_PATH_IDENTIFIER = Regex("[A-Za-z_][A-Za-z0-9_]*")
+    private val JSON_NUMBER = Regex("-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?")
     private val json = Json { encodeDefaults = true; ignoreUnknownKeys = false; isLenient = false }
     private val strategyTemplate by lazy {
         JsonObject(json.encodeToJsonElement(LabyrinthStrategySettings()).jsonObject - "personalRoleScores")
@@ -159,9 +186,12 @@ object LabyrinthConfigShareCodec {
         val envelope = decodeValue<Envelope>(root)
         require(envelope.format == "labyrinth-config" && envelope.schemaVersion == 1) { "不支持此配置格式，请升级应用" }
         require(envelope.modules.isNotEmpty() && envelope.modules.keys.all { it in setOf("strategy", "personalScores", "reroll") }) { "分享码未包含有效模块，或包含不支持的模块" }
+        val ignoredFields = mutableMapOf<LabyrinthConfigModule, Set<String>>()
         val strategy = envelope.modules["strategy"]?.let { element ->
-            val fields = requireFields(element, strategyTemplate)
+            val ignored = linkedSetOf<String>()
+            val fields = requireFields(completeFields(element, strategyTemplate, REQUIRED_V1_STRATEGY_KEYS, ignored), strategyTemplate)
             validateStrategyTypes(fields)
+            if (ignored.isNotEmpty()) ignoredFields[LabyrinthConfigModule.STRATEGY] = ignored
             decodeValue<LabyrinthStrategySettings>(fields)
         }
         val scores = envelope.modules["personalScores"]?.let { element ->
@@ -172,21 +202,24 @@ object LabyrinthConfigShareCodec {
         }
         val reroll = envelope.modules["reroll"]?.let { element ->
             val supplied = element as? JsonObject ?: throw IllegalArgumentException("刷开局模块结构无效")
-            val legacyKeys = rerollTemplate.keys - "customNodePlan"
-            val compatible = if (supplied.keys == legacyKeys) {
-                require(supplied["routeEvaluationMode"] != JsonPrimitive(LabyrinthRouteEvaluationMode.CUSTOM_NODES.name)) {
-                    "自定义模式缺少节点配置"
-                }
-                JsonObject(supplied + ("customNodePlan" to rerollTemplate.getValue("customNodePlan")))
-            } else supplied
-            val fields = requireFields(compatible, rerollTemplate)
-            requireFields(fields.getValue("customNodePlan"), rerollTemplate.getValue("customNodePlan") as JsonObject)
+            require("customNodePlan" in supplied || supplied["routeEvaluationMode"] != JsonPrimitive(LabyrinthRouteEvaluationMode.CUSTOM_NODES.name)) {
+                "自定义模式缺少节点配置"
+            }
+            val ignored = linkedSetOf<String>()
+            val fields = requireFields(completeFields(supplied, rerollTemplate, REQUIRED_V1_REROLL_KEYS, ignored), rerollTemplate)
+            val customTemplate = rerollTemplate.getValue("customNodePlan").jsonObject
+            val customFields = requireFields(
+                completeFields(fields.getValue("customNodePlan"), customTemplate, REQUIRED_V1_CUSTOM_NODE_KEYS, ignored, "customNodePlan."),
+                customTemplate,
+            )
             listOf("area3BossIds", "area5BossIds").forEach { key ->
                 requireArray(fields[key]).forEach { requirePrimitive(it, false) }
             }
-            decodeValue<LabyrinthRerollSettings>(fields)
+            if (ignored.isNotEmpty()) ignoredFields[LabyrinthConfigModule.REROLL] = ignored
+            decodeValue<LabyrinthRerollSettings>(JsonObject(fields + ("customNodePlan" to customFields)))
         }
-        return LabyrinthSharedConfiguration(envelope.appVersion, envelope.exportedAtMillis, strategy, scores, reroll).also(::validate)
+        return LabyrinthSharedConfiguration(envelope.appVersion, envelope.exportedAtMillis, strategy, scores, reroll, ignoredFields)
+            .also(::validate)
     }
 
     private fun validate(configuration: LabyrinthSharedConfiguration) {
@@ -206,11 +239,53 @@ object LabyrinthConfigShareCodec {
         configuration.reroll?.validationError()?.let { throw IllegalArgumentException(it) }
     }
 
-    private fun requireFields(element: JsonElement, template: JsonObject): JsonObject {
-        val fields = element as? JsonObject ?: throw IllegalArgumentException("配置模块结构无效")
+    private fun completeFields(
+        element: JsonElement,
+        template: JsonObject,
+        requiredKeys: Set<String>,
+        ignored: MutableSet<String>,
+        pathPrefix: String = "",
+    ): JsonObject {
+        val supplied = element as? JsonObject ?: throw IllegalArgumentException("配置模块结构无效")
+        require(supplied.keys.containsAll(requiredKeys)) { "配置模块字段缺失或不受当前版本支持，请使用兼容版本重新导出" }
+        val unknown = supplied.keys - template.keys
+        require(unknown.size <= MAX_UNKNOWN_FIELDS) { "配置对象包含过多不受支持的字段" }
+        supplied.keys.forEach(::requirePortableField)
+        unknown.forEach { key ->
+            validateUnknownValue(supplied.getValue(key))
+            ignored += if (FIELD_PATH_IDENTIFIER.matches(key)) "$pathPrefix$key"
+                else "${pathPrefix.removeSuffix(".")}[${JsonPrimitive(key)}]"
+        }
+        return JsonObject(template.mapValues { (key, default) -> supplied[key] ?: default })
+    }
+
+    private fun requirePortableField(key: String) {
+        require(key.lowercase() !in FORBIDDEN_FIELDS) { "分享码包含禁止导入的字段" }
+    }
+
+    // checkStructure has already bounded the depth of the entire input.
+    private fun validateUnknownValue(value: JsonElement) {
+        when (value) {
+            JsonNull -> throw IllegalArgumentException("新增配置字段不能包含空值")
+            is JsonObject -> {
+                require(value.size <= MAX_UNKNOWN_FIELDS) { "配置对象包含过多不受支持的字段" }
+                value.forEach { (key, child) ->
+                    requirePortableField(key)
+                    validateUnknownValue(child)
+                }
+            }
+            is JsonArray -> value.forEach(::validateUnknownValue)
+            is JsonPrimitive -> require(
+                value.isString || value.content == "true" || value.content == "false" || JSON_NUMBER.matches(value.content),
+            ) { "新增配置字段包含无效值" }
+        }
+    }
+
+    private fun requireFields(fields: JsonObject, template: JsonObject): JsonObject {
         require(fields.keys == template.keys) { "配置模块字段缺失或不受当前版本支持，请使用兼容版本重新导出" }
         template.forEach { (key, sample) ->
             when (sample) {
+                JsonNull -> Unit // A known nullable setting is type-checked by its serializer.
                 is JsonPrimitive -> requirePrimitive(fields[key], sample.isString)
                 is JsonArray -> requireArray(fields[key])
                 is JsonObject -> require(fields[key] is JsonObject) { "配置字段 $key 必须是对象" }
@@ -261,6 +336,7 @@ object LabyrinthConfigShareCodec {
                     val start = index++
                     while (index < text.length && text[index] != '"') {
                         if (text[index] == '\\') index++
+                        else require(text[index] >= '\u0020') { "配置字符串包含未转义的控制字符" }
                         index++
                     }
                     require(index < text.length) { "配置字符串不完整" }

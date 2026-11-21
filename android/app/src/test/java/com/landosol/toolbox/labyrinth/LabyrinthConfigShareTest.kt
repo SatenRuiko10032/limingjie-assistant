@@ -1,10 +1,14 @@
 package com.landosol.toolbox.labyrinth
 
+import com.landosol.toolbox.labyrinth.node.LabyrinthNodeTypes
 import java.io.ByteArrayOutputStream
 import java.util.Base64
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
@@ -68,6 +72,131 @@ class LabyrinthConfigShareTest {
             assertEquals(values.strategy.personalRoleScores.takeIf { module == LabyrinthConfigModule.PERSONAL_SCORES }, decoded.personalScores)
             assertEquals(values.rerolls.getValue(7L).takeIf { module == LabyrinthConfigModule.REROLL }, decoded.reroll)
         }
+    }
+
+    @Test fun `both battle switches round trip and replace the saved settings in both directions`() {
+        val source = shared(setOf(LabyrinthConfigModule.STRATEGY))
+        val disabled = requireNotNull(source.strategy)
+        val enabled = disabled.copy(frontlineSurvivalGateEnabled = true, normalBattleSkipTeamSelectionEnabled = true)
+        listOf(disabled to enabled, enabled to disabled).forEach { (before, after) ->
+            val target = values.copy(strategy = before.copy(personalRoleScores = values.strategy.personalRoleScores))
+            val restored = LabyrinthConfigShareCodec.decode(LabyrinthConfigShareCodec.encode(source.copy(strategy = after)))
+            assertEquals(after, restored.strategy)
+            assertEquals(
+                target.copy(strategy = after.copy(personalRoleScores = target.strategy.personalRoleScores)),
+                restored.replacement(target, restored.modules, null, false),
+            )
+        }
+    }
+
+    @Test fun `legacy strategy missing either or both battle switches uses defaults only for omitted fields`() {
+        val source = shared()
+        val enabled = requireNotNull(source.strategy)
+            .copy(frontlineSurvivalGateEnabled = true, normalBattleSkipTeamSelectionEnabled = true)
+        val root = sharePayload(source.copy(strategy = enabled))
+        val frontline = "frontlineSurvivalGateEnabled"
+        val skip = "normalBattleSkipTeamSelectionEnabled"
+        val defaults = LabyrinthStrategySettings()
+        listOf(setOf(frontline), setOf(skip), setOf(frontline, skip)).forEach { omitted ->
+            val payload = replaceModule(root, "strategy") { JsonObject(it - omitted) }
+            val restored = LabyrinthConfigShareCodec.decode(pack(payload.toString()))
+            assertEquals(
+                source.copy(strategy = enabled.copy(
+                    frontlineSurvivalGateEnabled = frontline !in omitted || defaults.frontlineSurvivalGateEnabled,
+                    normalBattleSkipTeamSelectionEnabled = skip !in omitted || defaults.normalBattleSkipTeamSelectionEnabled,
+                )),
+                restored,
+            )
+        }
+    }
+
+    @Test fun `legacy reroll may omit its plan only outside custom node mode`() {
+        val source = shared()
+        val root = sharePayload(source)
+        val legacy = replaceModule(root, "reroll") { JsonObject(it - "customNodePlan") }
+        assertEquals(source, LabyrinthConfigShareCodec.decode(pack(legacy.toString())))
+        val legacyWithAddition = replaceModule(legacy, "reroll") { JsonObject(it + ("futureFlag" to JsonPrimitive(true))) }
+        val ignored = mapOf(LabyrinthConfigModule.REROLL to setOf("futureFlag"))
+        assertEquals(source.copy(ignoredFieldsByModule = ignored), LabyrinthConfigShareCodec.decode(pack(legacyWithAddition.toString())))
+        val missingCustomPlan = replaceModule(legacyWithAddition, "reroll") {
+            JsonObject(it + ("routeEvaluationMode" to JsonPrimitive("CUSTOM_NODES")))
+        }
+        val failure = assertThrows(IllegalArgumentException::class.java) {
+            LabyrinthConfigShareCodec.decode(pack(missingCustomPlan.toString()))
+        }
+        assertEquals("自定义模式缺少节点配置", failure.message)
+    }
+
+    @Test fun `future fields are ignored in each compatible object and reported in the selected module preview`() {
+        val original = shared()
+        val source = original.copy(reroll = requireNotNull(original.reroll).copy(
+            routeEvaluationMode = LabyrinthRouteEvaluationMode.CUSTOM_NODES,
+            customNodePlan = LabyrinthCustomNodePlan(area1Column3 = LabyrinthNodeTypes.EVENT),
+        ))
+        val strategyFields = mapOf(
+            "futureSwitch" to JsonPrimitive(true),
+            "futureWeight" to JsonPrimitive(1.5),
+            "futureName" to JsonPrimitive("future\nname"),
+        )
+        val nested = JsonObject(mapOf("enabled" to JsonPrimitive(false)))
+        val strategyPayload = replaceModule(sharePayload(source), "strategy") { JsonObject(it + strategyFields) }
+        val payload = replaceModule(strategyPayload, "reroll") {
+            val custom = JsonObject(it.getValue("customNodePlan").jsonObject + ("futureCol" to nested))
+            JsonObject(it + mapOf(
+                "futureSteps" to JsonArray(listOf(JsonPrimitive(1), nested)),
+                "customNodePlan" to custom,
+            ))
+        }
+        val decoded = LabyrinthConfigShareCodec.decode(pack(payload.toString()))
+        assertEquals(source.copy(ignoredFieldsByModule = mapOf(
+            LabyrinthConfigModule.STRATEGY to strategyFields.keys,
+            LabyrinthConfigModule.REROLL to setOf("futureSteps", "customNodePlan.futureCol"),
+        )), decoded)
+        assertEquals(source, LabyrinthConfigShareCodec.decode(LabyrinthConfigShareCodec.encode(decoded)))
+        val target = LabyrinthConfigurationValues()
+        assertEquals(
+            source.replacement(target, source.modules, 9, false),
+            decoded.replacement(target, decoded.modules, 9, false),
+        )
+        val summary = LabyrinthConfigImportPlan(decoded, setOf(LabyrinthConfigModule.REROLL), 9L, target).changeSummary()
+        assertTrue(summary.contains("已忽略 2 项当前版本暂不支持的新增配置项：customNodePlan.futureCol、futureSteps"))
+        assertFalse(summary.any { "futureSwitch" in it })
+    }
+
+    @Test fun `future fields must be bounded valid json without nulls or credentials`() {
+        val root = sharePayload()
+        fun withFutureValue(value: JsonElement) = replaceModule(root, "strategy") {
+            JsonObject(it + ("futureField" to value))
+        }
+        listOf(JsonNull, JsonArray(listOf(JsonObject(mapOf("value" to JsonNull))))).forEach {
+            reject(pack(withFutureValue(it).toString()))
+        }
+        val valid = withFutureValue(JsonPrimitive("placeholder")).toString()
+        listOf("unquoted", "NaN", "01", "[true,]", "\"raw\nnewline\"", """{"value":true,"value":false}""").forEach {
+            reject(pack(valid.replace("\"placeholder\"", it)))
+        }
+        reject(pack(valid.replace("\"placeholder\"", "[".repeat(14) + "0" + "]".repeat(14))))
+
+        listOf("personalRoleScores", "accountId", "credentialKey", "password", "loginId", "gameUid",
+            "token", "cookie", "accessKey", "credentials", "APIKey").forEach { key ->
+            reject(pack(replaceModule(root, "strategy") { JsonObject(it + (key to JsonPrimitive("blocked"))) }.toString()))
+            reject(pack(withFutureValue(JsonArray(listOf(JsonObject(mapOf(key to JsonPrimitive("blocked")))))).toString()))
+        }
+        reject(pack(replaceModule(root, "reroll") {
+            JsonObject(it + ("customNodePlan" to JsonObject(it.getValue("customNodePlan").jsonObject + ("token" to JsonPrimitive("blocked")))))
+        }.toString()))
+        reject(pack(replaceModule(root, "reroll") { JsonObject(it - "valueAllowance") }.toString()))
+        reject(pack(replaceModule(root, "reroll") {
+            JsonObject(it + ("customNodePlan" to JsonObject(it.getValue("customNodePlan").jsonObject - "area1Column3")))
+        }.toString()))
+
+        val atLimit = (1..64).associate { "future$it" to JsonPrimitive(it) }
+        assertEquals(atLimit.keys, LabyrinthConfigShareCodec.decode(pack(replaceModule(root, "strategy") {
+            JsonObject(it + atLimit)
+        }.toString())).ignoredFieldsByModule[LabyrinthConfigModule.STRATEGY])
+        val overLimit = atLimit + ("oneTooMany" to JsonPrimitive(true))
+        reject(pack(replaceModule(root, "strategy") { JsonObject(it + overLimit) }.toString()))
+        reject(pack(withFutureValue(JsonObject(overLimit)).toString()))
     }
 
     @Test fun `whitespace from multiline paste is accepted`() {
@@ -197,6 +326,14 @@ class LabyrinthConfigShareTest {
     private fun reject(input: String) {
         assertThrows(IllegalArgumentException::class.java) { LabyrinthConfigShareCodec.decode(input) }
     }
+    private fun sharePayload(configuration: LabyrinthSharedConfiguration = shared()): JsonObject =
+        Json.parseToJsonElement(unpack(LabyrinthConfigShareCodec.encode(configuration))).jsonObject
+
+    private fun replaceModule(root: JsonObject, name: String, transform: (JsonObject) -> JsonObject): JsonObject {
+        val modules = root.getValue("modules").jsonObject
+        return JsonObject(root + ("modules" to JsonObject(modules + (name to transform(modules.getValue(name).jsonObject)))))
+    }
+
     private fun compressed(code: String) = Base64.getUrlDecoder().decode(code.removePrefix("LABY1."))
     private fun code(bytes: ByteArray) = "LABY1." + Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
     private fun unpack(code: String) = GZIPInputStream(compressed(code).inputStream()).bufferedReader().use { it.readText() }

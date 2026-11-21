@@ -93,6 +93,7 @@ android {
     }
 
     testOptions.unitTests.all {
+        it.maxHeapSize = "2048m"
         it.systemProperty("test.coexistSuffix", project.findProperty("coexistSuffix") ?: "")
     }
 }

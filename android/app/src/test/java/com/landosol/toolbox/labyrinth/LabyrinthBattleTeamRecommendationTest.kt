@@ -146,6 +146,22 @@ class LabyrinthBattleTeamRecommendationTest {
         assertTrue(decision.recommendation.reasons.any { it.contains("missing") })
     }
 
+    @Test fun `frontline refusal distinguishes missing positions from incompatible positions`() {
+        val profiles = (1..6).map { i ->
+            role("r$i", "角色$i", i, 70.0, 80.0, reliableVanguard = if (i == 5) 100.0 else 0.0)
+        }.associateBy { it.characterId }
+        val context = legacyFrontlineContext(defenseMarkStacks = 4).copy(currentArea = 2)
+        val conflict = recommendationPlanner(profiles).initialRecommendation(profiles.keys, context)
+            as LabyrinthBattleTeamRecommendationResult.Unavailable
+        assertTrue(conflict.reason.contains("虽有合格前排（角色5），但按现有站位无法组成5人安全队伍"))
+
+        val incomplete = profiles + listOf("r1", "r2").associateWith { profiles.getValue(it).copy(position = null) }
+        val missing = recommendationPlanner(incomplete).initialRecommendation(incomplete.keys, context)
+            as LabyrinthBattleTeamRecommendationResult.Unavailable
+        assertTrue(missing.reason.contains("缺少站位数据"))
+        assertTrue(missing.reason.contains("可用完整站位角色不足5名"))
+    }
+
     @Test
     fun `initial recommendation exposes first team diagnostics for automatic selection`() {
         val profiles = listOf(
@@ -679,7 +695,29 @@ class LabyrinthBattleTeamRecommendationTest {
             failedTeamSignatures = setOf(signature),
             retryNumber = 2,
         )
-        assertTrue(again is LabyrinthBattleTeamRecommendationResult.Unavailable)
+        assertTrue((again as LabyrinthBattleTeamRecommendationResult.Unavailable).reason.contains("候选阵容均已挑战失败"))
+    }
+
+    @Test fun `retry replaces a failed top ranked team even with a one team search beam`() {
+        val context = legacyFrontlineContext(defenseMarkStacks = 4)
+        for (withVanguard in listOf(false, true)) {
+            val profiles = (1..6).map { i ->
+                role("d$i", "角色$i", i, 70.0, 80.0, reliableVanguard = if (withVanguard && i == 1) 100.0 else 0.0)
+            }.associateBy { it.characterId }
+            val planner = recommendationPlanner(profiles, scoringConfig.copy(teamSearchBeamWidth = 1))
+            for (requestedTeams in listOf(1, 2)) {
+                val first = planner.retryRecommendation(
+                    profiles.keys, context, emptySet(), requestedBossTeamCount = requestedTeams,
+                ) as LabyrinthBattleTeamRecommendationResult.Ready
+                val failed = labyrinthBattleTeamSignature(first.recommendation.members.map { it.characterId })
+                val next = planner.retryRecommendation(
+                    profiles.keys, context, setOf(failed), requestedBossTeamCount = requestedTeams,
+                ) as LabyrinthBattleTeamRecommendationResult.Ready
+                assertEquals(5, next.recommendation.members.size)
+                assertEquals(if (withVanguard) 1 else 0, next.recommendation.safeBossTeamCount)
+                assertTrue(labyrinthBattleTeamSignature(next.recommendation.members.map { it.characterId }) != failed)
+            }
+        }
     }
 
     @Test fun `boss follow-up slot fields a supplement team when the residual roster has no tank`() {
@@ -711,8 +749,9 @@ class LabyrinthBattleTeamRecommendationTest {
 
     private fun recommendationPlanner(
         profiles: Map<String, LabyrinthRoleProfile>,
+        config: LabyrinthTeamScoringConfig = scoringConfig,
     ): LabyrinthBattleTeamRecommendationPlanner {
-        val optimizer = LabyrinthTeamOptimizer(LabyrinthTeamScorer(scoringConfig))
+        val optimizer = LabyrinthTeamOptimizer(LabyrinthTeamScorer(config))
         return LabyrinthBattleTeamRecommendationPlanner(
             profiles = profiles,
             teamPlanSearcher = LabyrinthTeamPlanSearcher(

@@ -1,5 +1,8 @@
 package com.landosol.toolbox.labyrinth
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -32,6 +35,51 @@ class LabyrinthConfigImportPlanTest {
         listOf("OFF", "AUTO_EQUIP", "MULTI_TEAM", "SINGLE_TEAM").forEach { token ->
             assertFalse(token, (forward + backward).any { token in it })
         }
+    }
+
+    @Test fun `battle switches show their Chinese labels and values in both directions`() {
+        val disabled = LabyrinthStrategySettings()
+        val enabled = disabled.copy(frontlineSurvivalGateEnabled = true, normalBattleSkipTeamSelectionEnabled = true)
+        val forward = strategySummary(disabled, enabled)
+        val backward = strategySummary(enabled, disabled)
+        listOf("前排生存门槛", "普战跳编队").forEach { label ->
+            assertTrue(forward.contains("$label：关闭 → 开启"))
+            assertTrue(backward.contains("$label：开启 → 关闭"))
+        }
+    }
+
+    @Test fun `ignored configuration fields appear under their selected module even when known values are identical`() {
+        val current = LabyrinthConfigurationValues(rerolls = mapOf(7L to LabyrinthRerollSettings()))
+        val configuration = LabyrinthSharedConfiguration("test", 0, strategy = current.strategy, reroll = current.rerolls.getValue(7L),
+            ignoredFieldsByModule = mapOf(
+                LabyrinthConfigModule.STRATEGY to setOf("futureSwitch"),
+                LabyrinthConfigModule.REROLL to setOf("customNodePlan.futureCol"),
+            ),
+        )
+        val plan = LabyrinthConfigImportPlan(configuration, configuration.modules, 7L, current)
+        assertEquals(listOf(
+            "全局策略（所有账号）",
+            "与当前配置相同",
+            "已忽略 1 项当前版本暂不支持的新增配置项：futureSwitch",
+            "刷开局设置（所选账号）",
+            "与当前配置相同",
+            "已忽略 1 项当前版本暂不支持的新增配置项：customNodePlan.futureCol",
+            "仅替换所选模块",
+        ), plan.changeSummary())
+        val strategyOnly = plan.copy(selected = setOf(LabyrinthConfigModule.STRATEGY), targetAccountId = null).changeSummary()
+        assertFalse(strategyOnly.any { "futureCol" in it })
+    }
+
+    @Test fun `every serialized preview field has a Chinese label`() {
+        val json = Json { encodeDefaults = true }
+        val strategyFields = json.encodeToJsonElement(LabyrinthStrategySettings()).jsonObject.keys - "personalRoleScores"
+        val rerollFields = json.encodeToJsonElement(LabyrinthRerollSettings()).jsonObject.keys
+        val customFields = json.encodeToJsonElement(LabyrinthCustomNodePlan()).jsonObject.keys
+        val chinese = Regex("\\p{IsHan}")
+        val fieldLabels = LabyrinthConfigImportPlan.FIELD_LABELS.filterValues(chinese::containsMatchIn)
+        val customLabels = LabyrinthConfigImportPlan.CUSTOM_NODE_LABELS.filterValues(chinese::containsMatchIn)
+        assertEquals(strategyFields + rerollFields, fieldLabels.keys)
+        assertEquals(customFields, customLabels.keys)
     }
 
     @Test fun `combat kinds and relic priority use names and preserve priority order`() {
@@ -127,6 +175,15 @@ class LabyrinthConfigImportPlanTest {
         LabyrinthOpeningRosterCatalog.configs.getValue(1).slots.forEach { slot ->
             slot.candidates.forEach { candidate -> assertTrue(changes.any { candidate.displayName in it }) }
         }
+    }
+
+    @Test fun `a guild absent from the catalog still appears in changed settings`() {
+        val reroll = LabyrinthRerollSettings()
+        assertTrue(rerollSummary(reroll.copy(guildId = 99), reroll)
+            .contains("刷开局默认公会：未知公会（编号 99） → 美食殿堂"))
+        val before = LabyrinthStrategySettings(openingRosters = mapOf(99 to listOf(listOf("999999"))))
+        val changes = strategySummary(before, before.copy(openingRosters = emptyMap()))
+        assertTrue(changes.contains("开局角色 · 未知公会（编号 99） · 第 1 槽：未知角色（编号 999999） → 未设置"))
     }
 
     @Test fun `late candidate changes are not hidden by character truncation`() {
