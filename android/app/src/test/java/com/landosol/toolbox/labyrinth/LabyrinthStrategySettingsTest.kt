@@ -9,6 +9,7 @@ class LabyrinthStrategySettingsTest {
         val original = productionDocument()
         assertEquals(original, LabyrinthStrategySettings().applyTo(original))
         assertEquals(LabyrinthBossTeamMode.MULTI_TEAM, LabyrinthStrategySettings().bossTeamMode)
+        assertTrue(LabyrinthStrategySettings().eventCustomizationEnabled)
         assertTrue(LabyrinthStrategySettings().preferPureBossDamageSystem)
         assertTrue(LabyrinthStrategySettings().attributePairingBonusEnabled)
         assertTrue(LabyrinthStrategySettings().singleBossFallbackToMultiAfterThreeFailures)

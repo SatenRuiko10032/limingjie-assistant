@@ -48,6 +48,7 @@ import android.app.Activity
 import android.content.Intent
 import android.os.PowerManager
 import android.provider.Settings
+import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.view.WindowManager
 import androidx.compose.ui.Modifier
@@ -158,7 +159,13 @@ fun LandosolToolboxApp() {
         } else {
             pendingCaptureAction = action
             val manager = context.getSystemService(MediaProjectionManager::class.java)
-            projectionLauncher.launch(manager.createScreenCaptureIntent())
+            // Request the default display explicitly so Android 14+ offers full-screen capture only.
+            val captureIntent = if (android.os.Build.VERSION.SDK_INT >= 34) {
+                manager.createScreenCaptureIntent(MediaProjectionConfig.createConfigForDefaultDisplay())
+            } else {
+                manager.createScreenCaptureIntent()
+            }
+            projectionLauncher.launch(captureIntent)
         }
     }
     val taskNotificationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->

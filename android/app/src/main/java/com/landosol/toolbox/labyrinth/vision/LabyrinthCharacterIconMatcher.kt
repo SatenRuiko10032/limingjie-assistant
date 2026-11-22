@@ -270,6 +270,7 @@ class LabyrinthCharacterIconMatcher(
         requiredAttribute: LabyrinthCharacterAttribute? = null,
         force: Boolean = false,
         rosterCharacterIds: Set<String>? = null,
+        onCandidateMatch: ((EntryPixelRect, LabyrinthCharacterIconMatch) -> Unit)? = null,
     ): LabyrinthCharacterIconMatch {
         if (initial.trusted && !force) return initial
         val radius = (iconRect.width / 90.0).roundToInt().coerceIn(1, 3)
@@ -294,13 +295,15 @@ class LabyrinthCharacterIconMatcher(
             }
         }.distinct()
         val alternatives = candidateRects.map { rect ->
-            match(
+            val candidate = match(
                 frame = frame,
                 iconRect = rect,
                 mask = mask,
                 requiredAttribute = requiredAttribute,
                 rosterCharacterIds = rosterCharacterIds,
             )
+            onCandidateMatch?.invoke(rect, candidate)
+            candidate
         }
         return reconcileGeometryMatches(initial, alternatives, force = force)
     }

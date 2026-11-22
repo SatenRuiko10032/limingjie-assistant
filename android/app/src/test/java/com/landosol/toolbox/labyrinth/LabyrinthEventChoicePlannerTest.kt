@@ -40,7 +40,7 @@ class LabyrinthEventChoicePlannerTest {
                 emptyMap(), LabyrinthTeamOptimizer(LabyrinthTeamScorer(LabyrinthTeamScoringConfig(
                     attributeDamageBonus = mapOf(1 to 0.0, 2 to 0.08, 3 to 0.16, 4 to 0.25, 5 to 0.75)))), settings,
             ).decide(observation, emptySet(), LabyrinthRoleDecisionContext(0), emptyMap(), rejected)
-        val disabled = LabyrinthStrategySettings()
+        val disabled = LabyrinthStrategySettings(eventCustomizationEnabled = false)
         assertFalse(disabled.eventCustomizationEnabled)
         assertTrue(decide(disabled) is LabyrinthEventChoiceDecision.Wait)
         val defaults = disabled.copy(eventCustomizationEnabled = true)
@@ -71,6 +71,7 @@ class LabyrinthEventChoicePlannerTest {
                 ),
             ),
         ),
+        strategy = LabyrinthStrategySettings(eventCustomizationEnabled = false),
     )
 
     @Test

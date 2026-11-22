@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import com.landosol.toolbox.labyrinth.LabyrinthBossTeamMode
 import com.landosol.toolbox.labyrinth.LabyrinthCombatKind
 import com.landosol.toolbox.labyrinth.LabyrinthCustomEventCatalog
+import com.landosol.toolbox.labyrinth.LabyrinthFrontlineSurvivalMode
 import com.landosol.toolbox.labyrinth.LabyrinthRelicMark
 import com.landosol.toolbox.labyrinth.LabyrinthSpecialEquipmentMode
 import com.landosol.toolbox.labyrinth.RESPONSE_INTERVAL_FAST
@@ -192,21 +193,30 @@ fun LabyrinthStrategySettingsScreen(
                                     StrategyNumber("第三队部署权重", draft.thirdTeamWeight, 0..100, "%", !saving) { draft = draft.copy(thirdTeamWeight = it) }
                                     StrategyNumber("重复纯职能基础扣分", draft.duplicateRolePenalty, 0..30, "分", !saving) { draft = draft.copy(duplicateRolePenalty = it) }
                                 }
-                                "战斗设置" -> StrategyPanel("战斗设置", "默认关闭 · 保存后下次启动生效") {
-                                    StrategySwitch(
-                                        "前排生存门槛",
-                                        "开启后限制新编组的前排生存资格，保留原有无T兜底和补刀例外；关闭不取消生存评分与开战安全检查。",
-                                        draft.frontlineSurvivalGateEnabled,
-                                        !saving,
-                                    ) { draft = draft.copy(frontlineSurvivalGateEnabled = it) }
+                                "战斗设置" -> StrategyPanel("战斗设置", "默认稳定 · 保存后下次任务生效") {
+                                    FrontlineSurvivalModeEditor(
+                                        settings = draft,
+                                        saving = saving,
+                                        onChange = { draft = it },
+                                    )
                                     StrategySwitch(
                                         "普战跳编队",
                                         "仅普通战首次尝试沿用已确认的满5人队伍，跳过重新选人；关闭按推荐阵容编组，不是跳过战斗。",
                                         draft.normalBattleSkipTeamSelectionEnabled,
                                         !saving,
                                     ) { draft = draft.copy(normalBattleSkipTeamSelectionEnabled = it) }
-                                    if (draft.normalBattleSkipTeamSelectionEnabled && draft.frontlineSurvivalGateEnabled) {
-                                        Text("推荐与识别流程正常时，沿用的现队不会按前排门槛重新换人。", style = MaterialTheme.typography.bodySmall)
+                                    if (draft.normalBattleSkipTeamSelectionEnabled) {
+                                        when (draft.effectiveFrontlineSurvivalMode) {
+                                            LabyrinthFrontlineSurvivalMode.VERY_AGGRESSIVE -> Text(
+                                                "已开启普战跳编队：沿用的现队即使含掩护者，也不会重新筛选。",
+                                                style = MaterialTheme.typography.bodySmall,
+                                            )
+                                            LabyrinthFrontlineSurvivalMode.CAUTIOUS -> Text(
+                                                "推荐与识别流程正常时，沿用的现队不会按前排门槛重新换人。",
+                                                style = MaterialTheme.typography.bodySmall,
+                                            )
+                                            LabyrinthFrontlineSurvivalMode.STABLE -> Unit
+                                        }
                                     }
                                 }
                                 "Boss编组" -> StrategyPanel(
@@ -416,6 +426,38 @@ fun LabyrinthStrategySettingsScreen(
 }
 
 @Composable
+private fun FrontlineSurvivalModeEditor(
+    settings: LabyrinthStrategySettings,
+    saving: Boolean,
+    onChange: (LabyrinthStrategySettings) -> Unit,
+) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    val mode = settings.effectiveFrontlineSurvivalMode
+    val title = "前排生存门槛：${mode.label}"
+    StrategySection(
+        title = title,
+        summary = mode.summary,
+        active = if (expanded) title else "",
+        select = { expanded = it.isNotEmpty() },
+        enabled = !saving,
+    ) {
+        Column(Modifier.fillMaxWidth().selectableGroup().alpha(if (saving) 0.38f else 1f)) {
+            LabyrinthFrontlineSurvivalMode.entries.forEach { choice ->
+                StrategyRadioChoice(
+                    label = choice.label,
+                    detail = choice.description,
+                    selected = mode == choice,
+                    enabled = !saving,
+                ) {
+                    onChange(settings.withFrontlineSurvivalMode(choice))
+                    expanded = false
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun EventCustomizationEditor(
     settings: LabyrinthStrategySettings,
     saving: Boolean,
@@ -425,7 +467,7 @@ private fun EventCustomizationEditor(
     val configured = settings.configuredEventChoiceOverrides()
     StrategyPanel(
         title = "事件自定义",
-        summary = if (settings.eventCustomizationEnabled) "已开启 · ${LabyrinthCustomEventCatalog.cards.size} 个可自定义事件" else "关闭（默认） · 已配置分支保留",
+        summary = if (settings.eventCustomizationEnabled) "已开启（默认） · ${LabyrinthCustomEventCatalog.cards.size} 个可自定义事件" else "关闭 · 已配置分支保留",
     ) {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             StrategySwitch(
@@ -606,10 +648,10 @@ private fun StrategyPanel(title: String, summary: String, content: @Composable C
 }
 
 @Composable
-private fun StrategySection(title: String, summary: String, active: String, select: (String) -> Unit, content: @Composable ColumnScope.() -> Unit) {
+private fun StrategySection(title: String, summary: String, active: String, select: (String) -> Unit, enabled: Boolean = true, content: @Composable ColumnScope.() -> Unit) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Column(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable { select(if (active == title) "" else title) }) {
+            Column(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(enabled = enabled) { select(if (active == title) "" else title) }) {
                 Text("$title ${if (active == title) "▴" else "▾"}", style = MaterialTheme.typography.titleMedium)
                 Text(summary, style = MaterialTheme.typography.bodySmall)
             }

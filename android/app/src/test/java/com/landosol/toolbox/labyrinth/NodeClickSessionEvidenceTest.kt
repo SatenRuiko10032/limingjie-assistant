@@ -561,7 +561,7 @@ class NodeClickSessionEvidenceTest {
                 assertNull(f.evidence.capture(at))
                 f.invoke("dispatchPostEntryTap", f.id, LabyrinthPostEntryActionKind.SELECT_EVENT,
                     "legacy single event selection", EntryPixelRect(500, 540, 200, 100), at,
-                    null, null, null, null, null, false, emptyList<String>())
+                    null, null, null, null, null, false, emptyList<String>(), null, null)
             }
             f.awaitActions()
             assertEquals(1, f.calls.get())
