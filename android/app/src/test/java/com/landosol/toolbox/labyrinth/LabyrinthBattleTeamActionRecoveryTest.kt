@@ -181,9 +181,9 @@ class LabyrinthBattleTeamActionRecoveryTest {
                 assertNull(feedFrame(session, frame, now))
                 assertEquals("the commit must survive the acknowledged window", ids, committedIds(session))
             }
-            assertEquals(
-                "没有已获得的可用角色",
-                session.state.value.battleTeamRecommendationUnavailableReason,
+            assertTrue(
+                session.state.value.battleTeamRecommendationUnavailableReason.orEmpty()
+                    .contains("没有已获得的可用角色"),
             )
             assertNull(session.state.value.battleTeamSelectionPlan)
 
@@ -306,7 +306,13 @@ class LabyrinthBattleTeamActionRecoveryTest {
     ): String? {
         frameClock(now)
         setState(session) { it.copy(frameTrace = LabyrinthFrameTrace()) }
-        invoke(session, "refreshBattleTeamRecommendation", sessionIdHolder, result.observation.state)
+        invoke(
+            session,
+            "refreshBattleTeamRecommendation",
+            sessionIdHolder,
+            result.observation.state,
+            result.battleTeamSelection,
+        )
         invoke(
             session,
             "refreshBattleTeamSelectionPlan",

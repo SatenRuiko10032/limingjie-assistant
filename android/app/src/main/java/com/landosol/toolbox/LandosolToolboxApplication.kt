@@ -242,6 +242,14 @@ class LandosolToolboxApplication : Application() {
             .orEmpty()
         LabyrinthEntryRecognitionSession(
             configurationGate = taskConfigurationGate,
+            runtimeEnvironmentProvider = {
+                val size = com.landosol.toolbox.automation.capture.CaptureStateRegistry.captureSize()
+                if (size == null) null else com.landosol.toolbox.labyrinth.LabyrinthRuntimeEnvironment(
+                    widthPixels = size.first, heightPixels = size.second,
+                    densityDpi = resources.configuration.densityDpi,
+                    availableProcessors = Runtime.getRuntime().availableProcessors(),
+                )
+            },
             strategyProvider = {
                 val settings = labyrinthConfiguration.state.value.strategy
                 com.landosol.toolbox.labyrinth.LabyrinthStrategySnapshot(
@@ -283,6 +291,10 @@ class LandosolToolboxApplication : Application() {
                         val snapshot = com.landosol.toolbox.labyrinth.LabyrinthBalancedVisionContext.current()
                         if (snapshot != null) snapshot.relicEvidenceVersion else labyrinthEntryRecognitionSession.relicEvidenceVersion
                     },
+                    shopEvidenceVersion = {
+                        val snapshot = com.landosol.toolbox.labyrinth.LabyrinthBalancedVisionContext.current()
+                        snapshot?.shopEvidenceVersion ?: labyrinthEntryRecognitionSession.shopEvidenceVersion
+                    },
                     relicVerificationMarks = {
                         val snapshot = com.landosol.toolbox.labyrinth.LabyrinthBalancedVisionContext.current()
                         if (snapshot != null) snapshot.relicVerificationMarks else labyrinthEntryRecognitionSession.relicVerificationMarks
@@ -302,7 +314,8 @@ class LandosolToolboxApplication : Application() {
                     eventCustomizationEnabled = labyrinthEntryRecognitionSession.eventCustomizationEnabledSnapshot,
                     allowInitial1088GeometryRefinement = {
                         val snapshot = com.landosol.toolbox.labyrinth.LabyrinthBalancedVisionContext.current()
-                        if (snapshot != null) snapshot.allowInitial1088GeometryRefinement else labyrinthEntryRecognitionSession.allowInitial1088GeometryRefinement()
+                        val capturedContext = com.landosol.toolbox.labyrinth.LabyrinthBalancedVisionContext.currentInitial1088RefinementContext()
+                        capturedContext?.allowed ?: if (snapshot != null) snapshot.allowInitial1088GeometryRefinement else labyrinthEntryRecognitionSession.allowInitial1088GeometryRefinement()
                     },
                 )::process
             },

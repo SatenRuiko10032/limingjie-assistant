@@ -52,6 +52,8 @@ import com.landosol.toolbox.labyrinth.vision.LabyrinthRelicMatch
 import com.landosol.toolbox.labyrinth.vision.labyrinthRelicDetailHoldsFrame
 import com.landosol.toolbox.labyrinth.vision.LabyrinthShopDialogState
 import com.landosol.toolbox.labyrinth.vision.LabyrinthShopItemKind
+import com.landosol.toolbox.labyrinth.vision.LabyrinthShopCategoryState
+import com.landosol.toolbox.labyrinth.vision.LabyrinthShopObservation
 import com.landosol.toolbox.labyrinth.vision.LabyrinthShopItemStatus
 import com.landosol.toolbox.labyrinth.vision.LabyrinthSpecialEquipmentStage
 import com.landosol.toolbox.labyrinth.node.LabyrinthNodeSession
@@ -1117,6 +1119,7 @@ data class LabyrinthEntryRecognitionSessionState(
     /** Diagnostic trace for the frame that produced [lastResult]; never read for decisions. */
     val frameTrace: LabyrinthFrameTrace = LabyrinthFrameTrace(),
     val frameTiming: LabyrinthFrameTiming? = null,
+    val initial1088Recovery: LabyrinthInitial1088RecoveryDiagnostic? = null,
     val balancedDiagnostics: LabyrinthBalancedDiagnostics? = null,
 ) {
     val running: Boolean get() = status == LabyrinthEntryRecognitionStatus.RUNNING
@@ -1175,6 +1178,8 @@ class LabyrinthEntryRecognitionSession(
     private val channelPrompts: com.landosol.toolbox.automation.session.ChannelLoginPromptAssistant? = null,
     private val fastProcessorFactory: (() -> (CapturedFrame) -> LabyrinthFastFrameObservation)? = null,
     private val fastFramePublisher: ((LabyrinthFastFrameObservation, LabyrinthEntryRecognitionSessionState) -> Unit)? = null,
+    /** Null keeps the legacy behaviour; production supplies capture size, density and core count. */
+    private val runtimeEnvironmentProvider: () -> LabyrinthRuntimeEnvironment? = { null },
 ) {
     private data class QueuedFrame(
         val sessionId: AutomationSessionId,
@@ -1329,18 +1334,40 @@ class LabyrinthEntryRecognitionSession(
         .map(LabyrinthJoinedCharacter::characterId)
         .toSet()
 
-    fun allowInitial1088GeometryRefinement(): Boolean {
+    fun allowInitial1088GeometryRefinement(): Boolean = initial1088RefinementContext().allowed
+
+    private fun initial1088RefinementContext(): LabyrinthInitial1088RefinementContext {
         val routeState = nodeSession?.getState()
         val route = validatedRoute
-        return labyrinthAllowsInitial1088GeometryRefinement(
-            routeState = routeState,
-            persistedNode = labyrinthPersistedCurrentNode(route) ?: routeState?.currentNodeId?.let { id ->
-                route?.nodes?.firstOrNull { it.blockId == id }
+        val persisted = labyrinthPersistedCurrentNode(route) ?: routeState?.currentNodeId?.let { id ->
+            route?.nodes?.firstOrNull { it.blockId == id }
+        }
+        val retained = entryPhaseComplete && initial1088HandoffEvidence.retained(clock())
+        val acceptedStart = initialStartExecuted && (!entryPhaseComplete || retained)
+        val transition = pendingNodeTransition != null || confirmedNodeEntryReceipt != null
+        val rejection = labyrinthInitial1088RefinementBlockReason(routeState, persisted, transition,
+            activeNodeType, shopChoiceImprintRolePending, acceptedStart)
+        val reason = rejection ?: when {
+            acceptedStart && retained -> "SUCCESSFUL_START_RETAINED_OVER_HANDOFF"
+            acceptedStart -> "SUCCESSFUL_START"
+            labyrinthPersistedCurrentNode(route) != null -> "PERSISTED_FIRST_START"
+            route?.currentBlockId == null && routeState != null -> "ROUTE_START_DEFAULT_NOT_OBSERVED"
+            else -> "CONFIRMED_ROUTE_FIRST_START"
+        }
+        return LabyrinthInitial1088RefinementContext(
+            allowed = rejection == null, reason = reason,
+            freshStartExecuted = initialStartExecuted, retainedHandoffStart = retained,
+            entryPhaseComplete = entryPhaseComplete,
+            initializationState = when {
+                nodeInitFailedReason != null -> "FAILED"
+                nodeSession != null -> "RESULT_READY"
+                nodeInitStarted.get() -> "STARTED_NO_RESULT"
+                else -> "NOT_STARTED"
             },
-            hasNodeTransition = pendingNodeTransition != null || confirmedNodeEntryReceipt != null,
-            activeNodeType = activeNodeType,
-            shopChoiceImprintPending = shopChoiceImprintRolePending,
-            initialStartExecuted = initialStartExecuted && !entryPhaseComplete,
+            routeArea = routeState?.currentArea, currentNodeId = routeState?.currentNodeId,
+            visitedCount = routeState?.visitedNodes?.size ?: 0, persistedNodeId = route?.currentBlockId,
+            activeNodeType = activeNodeType, transitionPending = transition,
+            imprintPending = shopChoiceImprintRolePending,
         )
     }
 
@@ -1560,6 +1587,9 @@ class LabyrinthEntryRecognitionSession(
     private var preferPureBossDamageSystem: Boolean = true
     /** Immutable user settings captured at start; saving during a run applies to the next run. */
     private var battleStrategySettingsSnapshot = LabyrinthStrategySettings()
+    private val battleFormationState = LabyrinthBattleFormationState()
+    private val currentNormalTeamHoldPlanner = LabyrinthBattleTeamSelectionPlanner(emptyMap())
+    private var battleFormationExhaustedReason: String? = null
     /**
      * 启动时抓取的设置快照，只用来回答「本次战斗的关卡类型要不要自动穿戴特别装备」：
      * 运行中保存新配置不改变本轮，只影响下一次启动。
@@ -1633,6 +1663,16 @@ class LabyrinthEntryRecognitionSession(
     /** 300-coin refills already paid for in the current shop node; cleared on every shop entry. */
     @Volatile
     private var shopRefreshesThisVisit = 0
+    private data class ShopRefreshBaseline(val capturedAt: Long, val coins: Int, val visual: Long, val fee: Int)
+    private var preparedShopRefresh: ShopRefreshBaseline? = null
+    private var shopRefreshTransaction = LabyrinthShopRefreshTransaction()
+    /** First frame the shop wallet balance was still unconfirmed; drives the 30s re-recognition backstop. */
+    @Volatile
+    private var shopCoinUnconfirmedSince = Long.MIN_VALUE
+    private val shopScan = LabyrinthShopScanController()
+    @Volatile var shopEvidenceVersion: Long = 0
+        private set
+    @Volatile private var shopRequiredCapturedAfter = Long.MIN_VALUE
     @Volatile
     private var pendingRelicSelection: LabyrinthRelicMatch? = null
     @Volatile
@@ -1689,6 +1729,10 @@ class LabyrinthEntryRecognitionSession(
     @Volatile
     private var nodeSession: LabyrinthNodeSession? = null
     private val nodeInitStarted = AtomicBoolean(false)
+    private val initial1088HandoffEvidence = LabyrinthInitial1088HandoffEvidence()
+    private val initial1088RecoveryGate = LabyrinthInitial1088RecoveryGate()
+    private val initial1088EvidenceLogs = LabyrinthInitial1088LogDeduplicator()
+    private val initial1088RecoveryLogs = LabyrinthInitial1088LogDeduplicator()
     @Volatile
     private var nodeInitFailedReason: String? = null
     @Volatile
@@ -1929,6 +1973,17 @@ class LabyrinthEntryRecognitionSession(
             _state.value = _state.value.copy(status = LabyrinthEntryRecognitionStatus.ERROR, message = reason)
             return LabyrinthEntryRecognitionStartResult.Blocked(reason)
         }
+        runtimeEnvironmentProvider()?.let { environment ->
+            val violations = labyrinthRuntimeEnvironmentViolations(environment)
+            if (violations.isNotEmpty()) {
+                val reason = labyrinthRuntimeEnvironmentBlockedMessage(violations)
+                _state.value = _state.value.copy(status = LabyrinthEntryRecognitionStatus.ERROR, message = reason)
+                return LabyrinthEntryRecognitionStartResult.Blocked(reason)
+            }
+            labyrinthRuntimeEnvironmentRecommendation(environment)?.let { recommendation ->
+                nodeLog("runtime-environment 环境 $recommendation")
+            }
+        }
         var executionGateMessage: String? = null
         val executionRoute = if (!dryRun && nodeExecutionConfigured()) {
             val gate = routeExecutionGate
@@ -2107,6 +2162,11 @@ class LabyrinthEntryRecognitionSession(
         plannedShopPurchaseCounted = false
         shopRelicPurchasesThisCycle = 0
         shopRefreshesThisVisit = 0
+        shopRefreshTransaction = LabyrinthShopRefreshTransaction()
+        preparedShopRefresh = null
+        shopRequiredCapturedAfter = Long.MIN_VALUE
+        shopEvidenceVersion++
+        resetShopScrollState()
         pendingRelicSelection = null
         relicChoiceCommitted = false
         roleRewardChoiceCommitted = false
@@ -2211,6 +2271,10 @@ class LabyrinthEntryRecognitionSession(
     private suspend fun setPausedOnControl(paused: Boolean): Boolean = mutex.withLock {
         val sessionId = activeSessionId ?: return false
         if (!sessionManager.setPaused(sessionId, paused)) return false
+        shopScan.reset(capturedAfter = clock())
+        preparedShopRefresh = null
+        invalidateShopEvidence(settleMillis = 0L)
+        // Keep an executed financial transaction pending for balance reconciliation after resume.
         nodeActionEvidence.invalidate()
         nodeConflictRecovery.reset()
         finalBossLocalizationStartedAt = Long.MIN_VALUE
@@ -2295,6 +2359,7 @@ class LabyrinthEntryRecognitionSession(
         plannedShopPurchaseStartedAt = Long.MIN_VALUE
         plannedShopRefreshStartedAt = Long.MIN_VALUE
         plannedShopRefreshConfirmedAt = Long.MIN_VALUE
+        resetShopScrollState()
         lastShopDialogState = LabyrinthShopDialogState.NONE
         relicStackLedger.clearPending()
         resetNodeExecutionState()
@@ -2356,24 +2421,31 @@ class LabyrinthEntryRecognitionSession(
      * replace older waiting frames (latest-frame-wins), so an occasional expensive frame can add
      * at most one recognition-duration of latency instead of creating an unbounded stale queue.
      */
-    private fun balancedVisionSnapshot(frame: CapturedFrame) = LabyrinthBalancedVisionContext.RequestSnapshot(
+    private fun balancedVisionSnapshot(frame: CapturedFrame): LabyrinthBalancedVisionContext.RequestSnapshot {
+        val refinementContext = initial1088RefinementContext().copy(
+            capturedAtMillis = frame.timestampMillis, frameSequence = frame.frameSequence)
+        return LabyrinthBalancedVisionContext.RequestSnapshot(
         finalBossOnly = nodeSession?.directFinalBossTarget() != null,
         skipJoinedCharacters = skipRoleRewardJoinedRecognition,
         relicEvidenceVersion = relicEvidenceVersion,
+        shopEvidenceVersion = shopEvidenceVersion,
         relicVerificationMarks = relicStackLedger.priorityVerificationMarks(frame.timestampMillis).map { it.label }.toSet(),
         nodeScanRequested = nodeSession != null,
         nodeScanConsumable = peekNodeScanConsumableAt(frame.timestampMillis),
         nodeSearchHint = currentNodeSearchHint(),
         rosterCharacterIds = rosterCharacterIds().toSet(),
-        allowInitial1088GeometryRefinement = allowInitial1088GeometryRefinement(),
+        allowInitial1088GeometryRefinement = refinementContext.allowed,
+        initial1088RefinementContext = refinementContext,
         lifecycleEpoch = lifecycleEpoch.get(), sceneEpoch = balancedSceneEpoch,
-    )
+        )
+    }
 
     private fun balancedRequestCurrent(request: LabyrinthBalancedVisionContext.RequestSnapshot): Boolean =
         request.lifecycleEpoch == lifecycleEpoch.get() && request.sceneEpoch == balancedSceneEpoch &&
             request.finalBossOnly == (nodeSession?.directFinalBossTarget() != null) &&
             request.skipJoinedCharacters == skipRoleRewardJoinedRecognition &&
             request.relicEvidenceVersion == relicEvidenceVersion &&
+            request.shopEvidenceVersion == shopEvidenceVersion &&
             request.rosterCharacterIds == rosterCharacterIds() &&
             request.allowInitial1088GeometryRefinement == allowInitial1088GeometryRefinement()
 
@@ -2390,7 +2462,7 @@ class LabyrinthEntryRecognitionSession(
         deliver = { frameLease, request, completed ->
             check(LabyrinthFourThreadRuntime.isControlThread())
             val frame = frameLease.value
-            if (!balancedRequestCurrent(request)) {
+            if (!balancedRequestCurrent(request) || frame.timestampMillis <= shopRequiredCapturedAfter) {
                 balancedDetailDiscards++
             } else if (_state.value.dryRun || actionTargetReady()) {
                 balancedDetailCapturedAt = frame.timestampMillis
@@ -2398,9 +2470,10 @@ class LabyrinthEntryRecognitionSession(
                 balancedDetailWidth = frame.bitmap.width; balancedDetailHeight = frame.bitmap.height
                 balancedDetailEpoch = request.sceneEpoch
                 val handlingStarted = System.nanoTime()
+                val enrichedResult = completed.result.copy(initial1088RefinementContext = request.initial1088RefinementContext)
                 lastNodeScanHoldReason = null
                 lastNodeScanQueryTimestampMillis = if (completed.queryUsed) frame.timestampMillis else null
-                processFrameResult(sessionId, completed.result, balancedDetailWidth, balancedDetailHeight, frame.timestampMillis)
+                processFrameResult(sessionId, enrichedResult, balancedDetailWidth, balancedDetailHeight, frame.timestampMillis)
                 if (activeSessionId == sessionId && !_state.value.paused && !manualPauseRequested.get() &&
                     request.lifecycleEpoch == lifecycleEpoch.get()) {
                     _state.value = _state.value.copy(frameTiming = LabyrinthFrameTiming(
@@ -2423,7 +2496,7 @@ class LabyrinthEntryRecognitionSession(
                         val presentation = buildOverlayPresentation(sessionId)
                         val diagnosticLease = frameLease.retain()
                         diagnosticLane.offer(close = { diagnosticLease.close() }) {
-                            publisher(diagnosticLease.value, stateSnapshot, completed.result, presentation)
+                            publisher(diagnosticLease.value, stateSnapshot, enrichedResult, presentation)
                         }
                     }
                 }
@@ -2588,19 +2661,25 @@ class LabyrinthEntryRecognitionSession(
         )
         val workerStarted = SystemClock.elapsedRealtime()
         val frameGeneration = roleDecisionGeneration.get()
+        val frameShopVersion = shopEvidenceVersion
         runCatching {
             lastNodeScanHoldReason = null
             lastNodeScanQueryTimestampMillis = null
+            val refinementContext = initial1088RefinementContext().copy(
+                capturedAtMillis = frame.timestampMillis, frameSequence = frame.frameSequence)
             val visionStarted = System.nanoTime()
             val result = try {
                 nodeScanFrameTimestampMillis = frame.timestampMillis
-                processor(frame)
+                LabyrinthBalancedVisionContext.withInitial1088RefinementContext(refinementContext) {
+                    processor(frame)
+                }.copy(initial1088RefinementContext = refinementContext)
             } finally { nodeScanFrameTimestampMillis = null }
             val measuredVisionMillis = (System.nanoTime() - visionStarted) / 1_000_000
             val handlingStarted = System.nanoTime()
             // stop()/pause may run while an expensive frame is being recognized. Never let that
             // stale result mutate a stopped/paused session or publish an old dashboard frame.
-            if (activeSessionId != sessionId || _state.value.paused || roleDecisionGeneration.get() != frameGeneration) return@runCatching
+            if (activeSessionId != sessionId || _state.value.paused || roleDecisionGeneration.get() != frameGeneration ||
+                frameShopVersion != shopEvidenceVersion || frame.timestampMillis <= shopRequiredCapturedAfter) return@runCatching
             processFrameResult(
                 sessionId = sessionId,
                 result = result,
@@ -2608,7 +2687,8 @@ class LabyrinthEntryRecognitionSession(
                 frameHeight = frameHeight,
                 timestampMillis = frame.timestampMillis,
             )
-            if (activeSessionId != sessionId || _state.value.paused || roleDecisionGeneration.get() != frameGeneration) return@runCatching
+            if (activeSessionId != sessionId || _state.value.paused || roleDecisionGeneration.get() != frameGeneration ||
+                frameShopVersion != shopEvidenceVersion || frame.timestampMillis <= shopRequiredCapturedAfter) return@runCatching
             _state.value = _state.value.copy(frameTiming = LabyrinthFrameTiming(
                 frameSequence = frame.frameSequence,
                 captureConvertMillis = frame.captureConvertMillis,
@@ -2652,6 +2732,7 @@ class LabyrinthEntryRecognitionSession(
     ) {
         if (activeSessionId != sessionId || (balancedMode && (_state.value.paused || manualPauseRequested.get() || stopRequested.get() ||
                 balancedDetailEpoch != balancedSceneEpoch))) return
+        logInitial1088Refinement(result, timestampMillis)
         val nodeEvidenceDimensionsChanged =
             nodeEvidenceFrameWidth != frameWidth || nodeEvidenceFrameHeight != frameHeight
         nodeEvidenceFrameWidth = frameWidth
@@ -2691,6 +2772,7 @@ class LabyrinthEntryRecognitionSession(
         _state.value = current.copy(
             frameCount = current.frameCount + 1,
             lastResult = result,
+            initial1088Recovery = null,
             message = if (result.observation.state == LabyrinthEntryPageState.UNKNOWN) {
                 "未知或低置信度页面，动作已禁用"
             } else {
@@ -2861,7 +2943,7 @@ class LabyrinthEntryRecognitionSession(
         if (activeSessionId != sessionId || _state.value.paused || stopRequested.get()) return
         refreshEventChoiceDecision(sessionId, result)
         refreshEffectiveCharacterScan(sessionId, result, frameWidth, frameHeight, timestampMillis)
-        refreshBattleTeamRecommendation(sessionId, pageState)
+        refreshBattleTeamRecommendation(sessionId, pageState, result.battleTeamSelection)
         refreshBattleTeamSelectionPlan(sessionId, pageState, result.battleTeamSelection)
         overlayCoordinator.update(sessionId, buildOverlayPresentation(sessionId))
         if (!current.dryRun && entryPhaseComplete &&
@@ -3034,6 +3116,7 @@ class LabyrinthEntryRecognitionSession(
         if (activeNodeArea == null && persistedCurrentNode?.blockType == LabyrinthNodeTypes.SHOP) {
             activeNodeType = LabyrinthNodeTypes.SHOP
             activeNodeArea = persistedCurrentNode.area ?: labyrinthNodeAreaOf(persistedCurrentNode.blockId)
+            resetShopScrollState()
         }
         val effectiveNodeType = activeNodeType ?: persistedCurrentNode?.blockType
         val eventFreeRoleSelection = labyrinthEventFreeRoleSelectionOwnsFrame(
@@ -4477,9 +4560,11 @@ class LabyrinthEntryRecognitionSession(
     private fun refreshBattleTeamRecommendation(
         sessionId: AutomationSessionId,
         pageState: LabyrinthEntryPageState,
+        observation: com.landosol.toolbox.labyrinth.vision.LabyrinthBattleTeamObservation?,
     ) {
         if (activeSessionId != sessionId) return
         if (pageState != LabyrinthEntryPageState.BATTLE_TEAM_SELECTION) {
+            battleFormationExhaustedReason = null
             if (balancedMode) battlePlanning.invalidate()
             if (
                 lastBattleTeamRecommendationKey != null ||
@@ -4545,6 +4630,7 @@ class LabyrinthEntryRecognitionSession(
             return
         }
 
+        if (publishCurrentNormalTeamHold(sessionId, observation)) return
         val current = _state.value
         val currentCombatContext = combatContext
         val battleArea = labyrinthBattleTeamArea(
@@ -4579,8 +4665,34 @@ class LabyrinthEntryRecognitionSession(
             .map(LabyrinthJoinedCharacter::characterId)
             .map(::canonicalLabyrinthRoleId)
             .distinct()
+        val usedCharacterIds = synchronized(committedBattleCharacterIds) { committedBattleCharacterIds.toSet() }
+        val eligibleCharacterIds = acquiredCharacterIds.filterNot(usedCharacterIds::contains)
+        val planner = battleTeamRecommendationPlanner
+        val savedFrontlineMode = battleStrategySettingsSnapshot.effectiveFrontlineSurvivalMode
+        val requestedFrontlineMode = battleFormationState.requestedMode(savedFrontlineMode)
+        val candidateSelection = planner?.formationCandidateSelection(eligibleCharacterIds, requestedFrontlineMode)
+        val reducedBossTarget = labyrinthAggressiveBossRemainingTeamTarget(
+            savedFrontlineMode, bossTeamMode == LabyrinthBossTeamMode.MULTI_TEAM &&
+                currentCombatContext?.kind == LabyrinthCombatKind.BOSS,
+            currentCombatContext?.teamIndex ?: 1, eligibleCharacterIds.size, usedCharacterIds.size,
+        )
+        if (reducedBossTarget != null) {
+            bossMultiTeamTargetCount = reducedBossTarget
+            battleFormationExhaustedReason = null
+            lastBattleTeamRecommendationKey = null
+            if (balancedMode) battlePlanning.invalidate()
+            _state.value = current.copy(battleTeamRecommendation = null, battleTeamSelectionPlan = null,
+                battleTeamRecommendationUnavailableReason = "Boss剩余角色不足5人；保留已确认的" +
+                    reducedBossTarget + "队，核验剩余空队后开始挑战")
+            return
+        }
         val cacheKey = buildString {
             append(acquiredCharacterIds.sorted().joinToString(","))
+            append("|roleGeneration=").append(roleDecisionGeneration.get())
+            append("|savedFrontlineMode=").append(savedFrontlineMode.name)
+            append("|requestedFrontlineMode=").append(requestedFrontlineMode.name)
+            append("|effectiveFrontlineMode=").append(candidateSelection?.effectiveMode?.name ?: "pending")
+            append("|candidatePool=").append(candidateSelection?.characterIds?.sorted()?.joinToString(",") ?: "pending")
             append("|area=")
             append(battleArea)
             append("|defense=")
@@ -4590,7 +4702,7 @@ class LabyrinthEntryRecognitionSession(
             append("|team=")
             append(currentCombatContext?.teamIndex ?: 1)
             append("|frontlineGate=")
-            append(battleStrategySettingsSnapshot.frontlineSurvivalGateEnabled)
+            append(requestedFrontlineMode.requiresFrontlineSurvivalGate)
             append("|bossMode=")
             append(bossTeamMode.name)
             append("|fallbackMulti=")
@@ -4630,11 +4742,6 @@ class LabyrinthEntryRecognitionSession(
             return
         }
 
-        val usedCharacterIds = synchronized(committedBattleCharacterIds) {
-            committedBattleCharacterIds.toSet()
-        }
-        val eligibleCharacterIds = acquiredCharacterIds.filterNot(usedCharacterIds::contains)
-        val planner = battleTeamRecommendationPlanner
         // 「不可用」是否由 cacheKey 的输入唯一决定。规划器自己的结论（没有可用角色、没有合格一号位
         // 等）是输入的纯函数，可以缓存；真正的瞬时故障（资料未加载、计算抛错）不是，缓存住就等于把
         // 一次瞬时失败固定成终态、每帧都命中同一条原因。内存不足是唯一的例外：按既有注释，它绝不
@@ -4646,7 +4753,8 @@ class LabyrinthEntryRecognitionSession(
             effectiveCharacterIds = synchronized(effectiveExCharacterIds) { effectiveExCharacterIds.toSet() },
             relaxedVanguardGate = currentCombatContext?.kind == LabyrinthCombatKind.BOSS && bossFallbackMultiTeamActive,
             currentArea = battleArea,
-            frontlineSurvivalGateEnabled = battleStrategySettingsSnapshot.frontlineSurvivalGateEnabled,
+            frontlineSurvivalGateEnabled = requestedFrontlineMode.requiresFrontlineSurvivalGate,
+            frontlineSurvivalMode = requestedFrontlineMode,
         )
         val allowSupplementLead = currentCombatContext?.kind == LabyrinthCombatKind.BOSS &&
             bossTeamMode == LabyrinthBossTeamMode.MULTI_TEAM && currentCombatContext.teamIndex > 1
@@ -4665,9 +4773,10 @@ class LabyrinthEntryRecognitionSession(
                 acquiredCharacterIds.toList(), eligibleCharacterIds.toList(), decisionContext,
                 failedSignatures.toList(), lastFailedSignature, retryNumber, requestedBossTeamCount,
                 allowSupplementLead, bossTeamMode, bossMultiTeamTargetCount, currentCombatContext,
-                usedCharacterIds.toList())
+                usedCharacterIds.toList(), savedFrontlineMode, requestedFrontlineMode, candidateSelection)
             val ready = battlePlanning.request(key, computeRecommendation)
             if (ready == null || (balancedDetailCapturedAt ?: Long.MIN_VALUE) <= battlePlanning.readyAt) {
+                battleFormationExhaustedReason = null
                 _state.value = current.copy(battleTeamRecommendation = null,
                     battleTeamRecommendationUnavailableReason = null, battleTeamSelectionPlan = null,
                     message = "编组规划进行中，等待规划返回后的新详细帧")
@@ -4683,7 +4792,22 @@ class LabyrinthEntryRecognitionSession(
         lastBattleTeamRecommendationKey = cacheKey.takeIf { recommendationResultCacheable }
         when (recommendationResult) {
             is LabyrinthBattleTeamRecommendationResult.Ready -> {
-                val recommendation = recommendationResult.recommendation
+                battleFormationExhaustedReason = null
+                val originalPlan = recommendationResult.recommendation
+                val plannedCount = labyrinthAggressiveBossPlannedRemainingTeams(
+                    savedFrontlineMode, currentCombatContext?.kind == LabyrinthCombatKind.BOSS &&
+                        bossTeamMode == LabyrinthBossTeamMode.MULTI_TEAM,
+                    requestedBossTeamCount, eligibleCharacterIds.size, originalPlan.plannedBossTeamCount,
+                )
+                val planned = originalPlan.copy(plannedBossTeamCount = plannedCount,
+                    safeBossTeamCount = minOf(originalPlan.safeBossTeamCount, plannedCount))
+                battleFormationState.observe(savedFrontlineMode, teamIndex, planned.formationMode,
+                    planned.formationFallbackReason)
+                val note = battleFormationState.fallbackNote
+                val recommendation = if (note == null) planned else planned.copy(
+                    reasons = (planned.reasons + note).distinct(),
+                    formationFallbackReason = planned.formationFallbackReason ?: battleFormationState.stableFallbackReason,
+                )
                 if (
                     currentCombatContext?.kind == LabyrinthCombatKind.BOSS &&
                     bossTeamMode == LabyrinthBossTeamMode.MULTI_TEAM
@@ -4692,6 +4816,8 @@ class LabyrinthEntryRecognitionSession(
                     val absoluteTarget = (teamIndex - 1 + recommendation.plannedBossTeamCount).coerceIn(teamIndex, 3)
                     if (bossMultiTeamTargetCount == null || teamIndex == 1) {
                         bossMultiTeamTargetCount = absoluteTarget
+                    } else if (savedFrontlineMode == LabyrinthFrontlineSurvivalMode.VERY_AGGRESSIVE) {
+                        bossMultiTeamTargetCount = minOf(bossMultiTeamTargetCount!!, absoluteTarget)
                     }
                 }
                 _state.value = current.copy(
@@ -4707,6 +4833,16 @@ class LabyrinthEntryRecognitionSession(
             }
 
             is LabyrinthBattleTeamRecommendationResult.Unavailable -> {
+                battleFormationState.observe(savedFrontlineMode, teamIndex, recommendationResult.formationMode,
+                    recommendationResult.formationFallbackReason)
+                val stableFallback = battleFormationState.stableFallbackReason != null ||
+                    recommendationResult.formationFallbackReason != null
+                val exhausted = savedFrontlineMode == LabyrinthFrontlineSurvivalMode.VERY_AGGRESSIVE &&
+                    recommendationResultCacheable && stableFallback &&
+                    recommendationResult.formationMode == LabyrinthFrontlineSurvivalMode.STABLE &&
+                    recommendationResult.failureKind in setOf(LabyrinthBattleFormationFailure.NO_LEGAL_FORMATION,
+                        LabyrinthBattleFormationFailure.EXHAUSTED_AFTER_STABLE)
+                battleFormationExhaustedReason = recommendationResult.reason.takeIf { exhausted }
                 _state.value = current.copy(
                     battleTeamRecommendation = null,
                     battleTeamRecommendationUnavailableReason = recommendationResult.reason,
@@ -4723,12 +4859,40 @@ class LabyrinthEntryRecognitionSession(
         }
     }
 
+    /** Reuses only the verified ordinary first-attempt team; a new score recommendation is not required. */
+    internal fun publishCurrentNormalTeamHold(
+        sessionId: AutomationSessionId,
+        observation: com.landosol.toolbox.labyrinth.vision.LabyrinthBattleTeamObservation?,
+    ): Boolean {
+        if (activeSessionId != sessionId || observation == null || !labyrinthRequestsCurrentNormalBattleTeam(
+                battleStrategySettingsSnapshot, combatContext?.kind, battleRetryCount)) return false
+        val plan = (battleTeamSelectionPlanner ?: currentNormalTeamHoldPlanner).plan(
+            sessionId = sessionId, recommendation = null, observation = observation,
+            holdCurrentTeamRequested = true,
+        )
+        if (!plan.holdCurrentTeam || !plan.teamReady) return false
+        battleFormationExhaustedReason = null
+        lastBattleTeamRecommendationKey = null
+        if (balancedMode) battlePlanning.invalidate()
+        _state.value = _state.value.copy(battleTeamRecommendation = null,
+            battleTeamRecommendationUnavailableReason = null, battleTeamSelectionPlan = plan,
+            message = "普通战沿用已确认的满5人现队，普战跳编队优先生效，准备开始战斗")
+        val log = plan.logText()
+        if (lastBattleTeamSelectionPlanLog != log) {
+            lastBattleTeamSelectionPlanLog = log
+            runCatching { Log.i(TEAM_SELECTION_PLAN_LOG_TAG, log) }
+        }
+        return true
+    }
+
     private fun refreshBattleTeamSelectionPlan(
         sessionId: AutomationSessionId,
         pageState: LabyrinthEntryPageState,
         observation: com.landosol.toolbox.labyrinth.vision.LabyrinthBattleTeamObservation?,
     ) {
         if (activeSessionId != sessionId) return
+        if (pageState == LabyrinthEntryPageState.BATTLE_TEAM_SELECTION &&
+            publishCurrentNormalTeamHold(sessionId, observation)) return
         val recommendation = _state.value.battleTeamRecommendation
         val planner = battleTeamSelectionPlanner
         if (
@@ -4857,6 +5021,7 @@ class LabyrinthEntryRecognitionSession(
         if (actionInFlight.get() || activeSessionId != sessionId) return
         if (!balancedFreshInput()) { traceReject("STALE_DETAILED_EVIDENCE"); return }
         val planner = actionPlanner ?: return
+        if (holdInitial1088Recovery(result, timestampMillis)) return
         val decision = synchronized(actionPlannerLock) {
             planner.decide(
                 state = result.observation.state,
@@ -4875,7 +5040,17 @@ class LabyrinthEntryRecognitionSession(
                     _state.value = _state.value.copy(message = decision.reason)
                 }
             }
-            is LabyrinthEntryActionDecision.Execute -> dispatchAction(sessionId, decision)
+            is LabyrinthEntryActionDecision.Execute -> {
+                if (decision.kind == LabyrinthEntryActionKind.SELECT_INITIAL_CHARACTER) {
+                    val chosen = synchronized(actionPlannerLock) { planner.pendingInitialCharacterId() }
+                    if (chosen == "1088" || chosen == "1002") {
+                        nodeLog("initial-1088-selection 选人 frame=" + (result.initial1088RefinementContext?.frameSequence ?: 0) +
+                            " capturedAt=" + timestampMillis + " chosen=" + chosen + " label=" + decision.label +
+                            " recovery=" + _state.value.initial1088Recovery?.status)
+                    }
+                }
+                dispatchAction(sessionId, decision)
+            }
             is LabyrinthEntryActionDecision.Complete ->
                 if (!nodeExecutionConfigured() && labyrinthCompletionWaitsWithoutRoute(decision.state)) {
                     // The run-clear settlement chain is owned by route execution. Without a
@@ -4887,6 +5062,8 @@ class LabyrinthEntryRecognitionSession(
                 } else if (nodeExecutionConfigured() && shouldHandOffToRouteExecution(decision.state)) {
                     // A live session can be started on the map or on a route-owned page. Hand it
                     // to the route executor instead of treating the entry planner as finished.
+                    initial1088HandoffEvidence.record(decision.state, initialStartExecuted,
+                        allowInitial1088GeometryRefinement(), timestampMillis)
                     entryPhaseComplete = true
                     existingRunResumeHandoffArmed = false
                     _state.value = _state.value.copy(
@@ -5040,27 +5217,205 @@ class LabyrinthEntryRecognitionSession(
         LabyrinthEntryPageState.RUN_CLEAR_CHEST_RESULT,
     )
 
-    private fun currentShopDecision(result: LabyrinthEntryFrameResult): LabyrinthShopDecision? {
+    private fun currentShopDecision(
+        result: LabyrinthEntryFrameResult,
+        scanComplete: Boolean = shopScan.complete,
+    ): LabyrinthShopDecision? {
         val shop = result.shopObservation ?: return null
         if (shop.dialogState != LabyrinthShopDialogState.NONE) return null
+        shopRefreshTransaction.pending?.let {
+            return LabyrinthShopDecision.Wait("刷新事务未结算（已用" + shopRefreshesThisVisit + "次）：" + it.reason)
+        }
+        if (shop.coinBalanceConfirmed) shopCoinUnconfirmedSince = Long.MIN_VALUE
+        val area = activeNodeArea ?: _state.value.routeProgress?.currentArea
+        val scannedArea = area == 3 || area == 4 || area == 5
         val refreshAnchorReady = result.anchorMatches[EntryAnchorId.SHOP_REFRESH_BUTTON]
-            ?.score
-            ?.let { it >= POST_ENTRY_ANCHOR_MIN_SCORE }
-            ?: false
-        return shopPolicy.decide(
-            // Prefer the area of the node we actually tapped. routeProgress.currentArea can lag
-            // behind while the post-entry shop page is already visible, which previously caused
-            // an area-4 shop to fall through into relic recognition and stop on missing metadata.
-            currentArea = activeNodeArea ?: _state.value.routeProgress?.currentArea,
-            items = shop.items,
-            acquired = _state.value.observedRelics,
+            ?.score?.let { it >= POST_ENTRY_ANCHOR_MIN_SCORE } ?: false
+        val full = shop.items.filter { it.visibility == com.landosol.toolbox.labyrinth.vision.LabyrinthShopItemVisibility.FULL }
+        val decision = shopPolicy.decide(
+            currentArea = area, items = full, acquired = _state.value.observedRelics,
             calibratedStacks = relicMarkStackCalibration,
             refreshAvailable = refreshAnchorReady && shop.refreshButtonEnabled,
-            lockedFocus = relicFocusMark,
-            relicPurchasesInCycle = shopRelicPurchasesThisCycle,
-            refreshAvailabilityKnown = refreshAnchorReady,
-            refreshesUsedInVisit = shopRefreshesThisVisit,
+            lockedFocus = relicFocusMark, relicPurchasesInCycle = shopRelicPurchasesThisCycle,
+            refreshAvailabilityKnown = refreshAnchorReady, refreshesUsedInVisit = shopRefreshesThisVisit,
+            coinBalance = if (shop.coinBalanceConfirmed) shop.coinBalance else null,
+            stockScanComplete = !scannedArea || scanComplete,
+            allowSecondaryPurchases = true, allowClearancePurchases = true,
         )
+        if (decision is LabyrinthShopDecision.Close && decision.immediate) return decision
+        if (decision is LabyrinthShopDecision.Wait && decision.kind == LabyrinthShopWaitKind.COINS) return decision
+        if (scannedArea) shopScan.readingReason(shop)?.let {
+            return LabyrinthShopDecision.Wait("本页读取未完成：" + it, LabyrinthShopWaitKind.ITEMS)
+        }
+        return decision
+    }
+
+    private fun resetShopScrollState() {
+        shopCoinUnconfirmedSince = Long.MIN_VALUE
+        shopScan.reset()
+    }
+
+    /** Called only AFTER an input landed, so the executor's own freshness check is not self-rejected. */
+    private fun invalidateShopEvidence(settleMillis: Long = LabyrinthShopScanController.SETTLE_MILLIS) {
+        shopEvidenceVersion++
+        shopRequiredCapturedAfter = clock() + settleMillis
+        clearQueuedFrame()
+        if (balancedMode) {
+            balancedRequiredCapturedAfter = maxOf(balancedRequiredCapturedAfter, shopRequiredCapturedAfter)
+            balancedSceneEpoch++
+            balancedPipeline?.clearPending()
+            invalidateBalancedPlanning()
+        }
+    }
+
+    private fun shopSwipeAction(frameWidth: Int, frameHeight: Int, up: Boolean, short: Boolean = false): AutomationAction.Swipe? {
+        if (frameWidth <= 0 || frameHeight <= 0) return null
+        val x = SHOP_SWIPE_X_RATIO * frameWidth
+        val yTop = SHOP_SWIPE_TOP_Y_RATIO * frameHeight
+        val yBottom = SHOP_SWIPE_BOTTOM_Y_RATIO * frameHeight
+        return AutomationAction.Swipe(
+            start = if (up) ScreenPoint(x, yBottom) else ScreenPoint(x, yTop),
+            end = if (short) ScreenPoint(x, if (up) yBottom - (yBottom - yTop) * 0.15f else yTop + (yBottom - yTop) * 0.15f)
+                else if (up) ScreenPoint(x, yTop) else ScreenPoint(x, yBottom),
+            durationMillis = SHOP_SCROLL_DURATION_MILLIS,
+        )
+    }
+
+    private fun consumeShopScanStep(
+        step: LabyrinthShopScanController.Step, shop: LabyrinthShopObservation,
+        sessionId: AutomationSessionId, frameWidth: Int, frameHeight: Int, reportWait: (String) -> Unit,
+    ) {
+        when (step) {
+            is LabyrinthShopScanController.Step.Wait -> reportWait(step.reason)
+            is LabyrinthShopScanController.Step.Stop -> {
+                reportWait(step.reason)
+                finishFromPlanner(sessionId, step.reason)
+            }
+            is LabyrinthShopScanController.Step.Reacquire -> {
+                preparedShopRefresh = null
+                invalidateShopEvidence(settleMillis = 0L)
+                reportWait(step.reason)
+            }
+            is LabyrinthShopScanController.Step.Swipe, is LabyrinthShopScanController.Step.Reposition -> {
+                val alignment = step is LabyrinthShopScanController.Step.Reposition
+                val up = if (step is LabyrinthShopScanController.Step.Swipe) step.up else (step as LabyrinthShopScanController.Step.Reposition).up
+                val swipe = shopSwipeAction(frameWidth, frameHeight, up, short = alignment) ?: return
+                if (!beginGuardedAction()) return
+                val id = shopScan.submitSwipe(up, shop, clock(), alignment = alignment)
+                reportWait("商店扫描翻页，等待动作完成及新画面")
+                launchGuardedAction(onSuppressed = { shopScan.swipeNotExecuted(id) }) {
+                    try {
+                        val executor = actionExecutor
+                        val outcome = if (executor == null) AutomationActionResult.Rejected(swipe, "动作执行器不可用")
+                            else executeBalancedAction(executor, sessionId, swipe)
+                        if (activeSessionId != sessionId) return@launchGuardedAction
+                        when (outcome) {
+                            is AutomationActionResult.Executed -> if (shopScan.swipeExecuted(id, clock())) {
+                                invalidateShopEvidence()
+                                lastPostEntryActionAt = clock()
+                                lastPostEntryActionLandedAt = lastPostEntryActionAt
+                                resetPostEntryStall()
+                                val label = if (alignment) "商店微调：对齐完整可见商品"
+                                    else if (up) "商店翻页：上滑查看下方商品" else "商店翻页：下滑回顶部复扫"
+                                _state.value = _state.value.copy(actionCount = _state.value.actionCount + 1,
+                                    lastActionLabel = label, message = label + "，等待新商品画面稳定")
+                                overlayCoordinator.update(sessionId, buildOverlayPresentation(sessionId))
+                            }
+                            is AutomationActionResult.Rejected -> shopScan.swipeNotExecuted(id, outcome.reason)
+                            else -> shopScan.swipeNotExecuted(id)
+                        }
+                    } catch (failure: Exception) {
+                        shopScan.swipeNotExecuted(id, failure.message ?: "动作异常")
+                        throw failure
+                    }
+                }
+            }
+            is LabyrinthShopScanController.Step.Evaluate -> Unit
+        }
+    }
+
+    private fun planShopTap(
+        sessionId: AutomationSessionId, result: LabyrinthEntryFrameResult,
+        frameWidth: Int, frameHeight: Int, timestampMillis: Long, reportWait: (String) -> Unit,
+    ): LabyrinthPostEntryTapPlan? {
+        val shop = result.shopObservation ?: return null
+        // Confirmation can flash SHOP before its completion receipt; do not overwrite that transaction.
+        if (shopConfirmClosedFrames > 0 && (plannedShopPurchaseRelicId != null || plannedShopRoleImprintLabel != null)) {
+            reportWait("等待本次购买结果或取消确认，不重选补位商品")
+            return null
+        }
+        val area = activeNodeArea ?: _state.value.routeProgress?.currentArea
+        var decision = currentShopDecision(result) ?: return null
+        // Coin confirmation and hard stop are authoritative even before navigation/recognition waits.
+        if (decision is LabyrinthShopDecision.Wait && decision.kind == LabyrinthShopWaitKind.COINS) {
+            reportWait(decision.reason)
+            if (shopCoinUnconfirmedSince == Long.MIN_VALUE) shopCoinUnconfirmedSince = timestampMillis
+            else if (timestampMillis - shopCoinUnconfirmedSince > 30_000L)
+                finishFromPlanner(sessionId, "商店金币超过30秒未能识别确定，已停止并保留诊断状态")
+            return null
+        }
+        if (!(decision is LabyrinthShopDecision.Close && decision.immediate) && (area == 3 || area == 4 || area == 5)) {
+            val capturedAt = if (balancedMode) balancedDetailCapturedAt ?: Long.MIN_VALUE else timestampMillis
+            val step = shopScan.observe(shop, clock(), capturedAt, currentArea = area)
+            if (step !is LabyrinthShopScanController.Step.Evaluate) {
+                consumeShopScanStep(step, shop, sessionId, frameWidth, frameHeight, reportWait)
+                return null
+            }
+            decision = currentShopDecision(result, step.complete) ?: return null
+            if (decision is LabyrinthShopDecision.Wait) {
+                if (decision.kind == LabyrinthShopWaitKind.SCAN) {
+                    consumeShopScanStep(shopScan.advance(shop, clock()), shop, sessionId, frameWidth, frameHeight, reportWait)
+                } else {
+                    reportWait(decision.reason)
+                    if (shopScan.readTimedOut(clock()) && decision.kind == LabyrinthShopWaitKind.OTHER)
+                        finishFromPlanner(sessionId, "商店安全复核超时：" + decision.reason)
+                }
+                return null
+            }
+        }
+        return when (val selected = decision) {
+            is LabyrinthShopDecision.BuyRelic -> {
+                val relic = selected.relicDecision.choice
+                if (plannedShopPurchaseRelicId != relic.relicId) relicStackLedger.cancel(plannedShopPurchaseRelicId)
+                if (!relicIdentityGate.confirmed(relic) || !prepareRelicAcquisition(relic)) {
+                    reportWait("正在复核待购买遗物身份")
+                    if (shopScan.readTimedOut(clock())) finishFromPlanner(sessionId, "商店遗物身份复核超时，拒绝盲买")
+                    null
+                } else {
+                    if (selected.relicDecision.phase != LabyrinthRelicChoicePhase.BUILD_BASELINE)
+                        relicFocusMark = selected.relicDecision.focusMark
+                    plannedShopRoleImprintLabel = null
+                    plannedShopPurchaseRelicId = relic.relicId
+                    LabyrinthPostEntryTapPlan(LabyrinthPostEntryActionKind.SHOP_BUY_RELIC,
+                        "购买遗物：" + (relic.displayName ?: relic.relicId) + "；" + selected.relicDecision.reason,
+                        selected.item.buyButtonRect)
+                }
+            }
+            is LabyrinthShopDecision.BuyRoleImprint -> {
+                relicStackLedger.cancel(plannedShopPurchaseRelicId)
+                pendingShopPurchase = null; plannedShopPurchaseRelicId = null
+                plannedShopRoleImprintLabel = selected.label
+                shopChoiceImprintRolePending = selected.opensRolePicker
+                LabyrinthPostEntryTapPlan(LabyrinthPostEntryActionKind.SHOP_BUY_IMPRINT,
+                    "购买印记：" + selected.label + "；" + selected.reason, selected.item.buyButtonRect)
+            }
+            is LabyrinthShopDecision.Refresh -> {
+                clearPlannedShopPurchase()
+                anchorRect(result, EntryAnchorId.SHOP_REFRESH_BUTTON)?.let {
+                    val coins = shop.coinBalance?.takeIf { shop.coinBalanceConfirmed } ?: return null
+                    preparedShopRefresh = ShopRefreshBaseline(timestampMillis, coins, shop.visualFingerprint,
+                        if (shopRefreshesThisVisit == 0) 300 else 600)
+                    LabyrinthPostEntryTapPlan(LabyrinthPostEntryActionKind.SHOP_REFRESH, "刷新商店：" + selected.reason, it)
+                } ?: run { reportWait("策略允许刷新，但刷新按钮没有达到安全识别线"); null }
+            }
+            is LabyrinthShopDecision.Close -> {
+                clearPlannedShopPurchase()
+                anchorRect(result, EntryAnchorId.SHOP_CLOSE)?.let {
+                    LabyrinthPostEntryTapPlan(LabyrinthPostEntryActionKind.SHOP_CLOSE, "关闭商店：" + selected.reason, it)
+                } ?: run { reportWait("商店已无计划购买项，但关闭按钮未稳定识别"); null }
+            }
+            is LabyrinthShopDecision.Wait -> { reportWait(selected.reason); null }
+        }
     }
 
     /** Battle waiting gates all route taps before UNKNOWN can reach any animation fallback. */
@@ -6711,74 +7066,8 @@ class LabyrinthEntryRecognitionSession(
                 }
             }
 
-            LabyrinthEntryPageState.SHOP -> when (val decision = currentShopDecision(result)) {
-                is LabyrinthShopDecision.BuyRelic -> {
-                    val relic = decision.relicDecision.choice
-                    if (plannedShopPurchaseRelicId != relic.relicId) relicStackLedger.cancel(plannedShopPurchaseRelicId)
-                    if (!relicIdentityGate.confirmed(relic) || !prepareRelicAcquisition(relic)) {
-                        shopWaitReason = "正在复核待购买遗物身份"
-                        null
-                    } else {
-                        if (decision.relicDecision.phase != LabyrinthRelicChoicePhase.BUILD_BASELINE) {
-                            relicFocusMark = decision.relicDecision.focusMark
-                        }
-                        plannedShopRoleImprintLabel = null
-                        plannedShopPurchaseRelicId = relic.relicId
-                        LabyrinthPostEntryTapPlan(
-                            LabyrinthPostEntryActionKind.SHOP_BUY_RELIC,
-                            "购买遗物：${relic.displayName ?: relic.relicId}；${decision.relicDecision.reason}",
-                            decision.item.buyButtonRect,
-                        )
-                    }
-                }
-
-                is LabyrinthShopDecision.BuyRoleImprint -> {
-                    relicStackLedger.cancel(plannedShopPurchaseRelicId)
-                    pendingShopPurchase = null
-                    plannedShopPurchaseRelicId = null
-                    plannedShopRoleImprintLabel = decision.label
-                    // A 选择印记 opens the roster picker once the purchase completes; a 随机印记
-                    // does not. Remember which was bought so the picker is answered by the
-                    // free-role selector rather than the opening-roster handler.
-                    shopChoiceImprintRolePending = decision.opensRolePicker
-                    LabyrinthPostEntryTapPlan(
-                        LabyrinthPostEntryActionKind.SHOP_BUY_IMPRINT,
-                        "购买印记：${decision.label}（${if (decision.opensRolePicker) "选择" else "随机"}）；${decision.reason}",
-                        decision.item.buyButtonRect,
-                    )
-                }
-
-                is LabyrinthShopDecision.Refresh -> {
-                    clearPlannedShopPurchase()
-                    val rect = anchorRect(result, EntryAnchorId.SHOP_REFRESH_BUTTON)
-                    if (rect != null) {
-                        LabyrinthPostEntryTapPlan(LabyrinthPostEntryActionKind.SHOP_REFRESH, "刷新商店：${decision.reason}", rect)
-                    } else {
-                        shopWaitReason = "策略允许刷新，但刷新按钮没有达到安全识别线"
-                        null
-                    }
-                }
-
-                is LabyrinthShopDecision.Close -> {
-                    clearPlannedShopPurchase()
-                    val rect = anchorRect(result, EntryAnchorId.SHOP_CLOSE)
-                    if (rect != null) {
-                        LabyrinthPostEntryTapPlan(LabyrinthPostEntryActionKind.SHOP_CLOSE, "关闭商店：${decision.reason}", rect)
-                    } else {
-                        shopWaitReason = "商店已无计划购买项，但关闭按钮未稳定识别"
-                        null
-                    }
-                }
-
-                is LabyrinthShopDecision.Wait -> {
-                    shopWaitReason = decision.reason
-                    null
-                }
-
-                null -> {
-                    shopWaitReason = "商店商品识别尚未生成"
-                    null
-                }
+            LabyrinthEntryPageState.SHOP -> planShopTap(sessionId, result, frameWidth, frameHeight, timestampMillis) {
+                shopWaitReason = it
             }
 
             LabyrinthEntryPageState.SHOP_PURCHASE_CONFIRMATION -> {
@@ -7117,6 +7406,30 @@ class LabyrinthEntryRecognitionSession(
             )
             return
         }
+        val exhaustedReason = battleFormationExhaustedReason
+        if (exhaustedReason != null && preparationStep == null) {
+            if (!publishCurrentNormalTeamHold(sessionId, observation)) {
+                if (observation.recognitionState != com.landosol.toolbox.labyrinth.vision.LabyrinthBattleTeamRecognitionState.STABLE ||
+                    observation.selectedCharacters.any { it.characterId == null ||
+                        it.confidence < com.landosol.toolbox.labyrinth.vision.LABYRINTH_BATTLE_CHARACTER_SAFE_CONFIDENCE }) return
+                when (labyrinthExhaustedFormationAction(
+                    battleStrategySettingsSnapshot.effectiveFrontlineSurvivalMode,
+                    LabyrinthBattleFormationFailure.EXHAUSTED_AFTER_STABLE,
+                    rerollAfterThreeBattleFailures, _state.value.dryRun,
+                )) {
+                    LabyrinthExhaustedFormationAction.REROLL -> {
+                        finishFromPlannerAndRequestReroll(sessionId, "非常激进已临时按稳定重新推荐，仍无新的可用阵容；" + exhaustedReason)
+                        return
+                    }
+                    LabyrinthExhaustedFormationAction.PROMPT -> {
+                        pendingTerminalOutcome = LabyrinthRunTerminalOutcome.FAILED_MAX_RETRY
+                        finishFromPlanner(sessionId, "稳定仍无新的可用阵容，未允许自动重刷，请手动处理；" + exhaustedReason)
+                        return
+                    }
+                    LabyrinthExhaustedFormationAction.NONE -> Unit
+                }
+            }
+        }
         // 「特别装备」闸门：Boss 预处理完成之后、产出任何编组执行步（含三条路径各自的 START_BATTLE）
         // 之前。本轮没结束时这一帧由特别装备流程接管并 return，于是下面三个调用点都无法产出动作；
         // 本轮结束（成功 / 未变更 / 超限放弃）或不适用时返回 false，原有编组/开战路径逐字继续。
@@ -7168,7 +7481,7 @@ class LabyrinthEntryRecognitionSession(
                 }
             }
         } else {
-            val recommendation = _state.value.battleTeamRecommendation ?: return
+            val recommendation = _state.value.battleTeamRecommendation
             val plan = _state.value.battleTeamSelectionPlan ?: return
             if (!plan.isStillValid(sessionId, recommendation, observation)) return
             val search = battleRosterSearch.observe(sessionId, observation, plan.recommendedIds)
@@ -8038,6 +8351,8 @@ class LabyrinthEntryRecognitionSession(
     )
 
     private fun resetBattleRetryTracking() {
+        battleFormationState.reset()
+        battleFormationExhaustedReason = null
         battleRetryCount = 0
         synchronized(currentBattleTeamSignatures) { currentBattleTeamSignatures.clear() }
         synchronized(failedBattleTeamSignatures) { failedBattleTeamSignatures.clear() }
@@ -8138,6 +8453,17 @@ class LabyrinthEntryRecognitionSession(
                 return
             }
         }
+        val refreshBaseline = if (kind == LabyrinthPostEntryActionKind.SHOP_REFRESH) preparedShopRefresh else null
+        if (kind == LabyrinthPostEntryActionKind.SHOP_REFRESH &&
+            (refreshBaseline == null || refreshBaseline.capturedAt != timestampMillis || shopRefreshTransaction.pending != null)) {
+            traceReject("SHOP_REFRESH_BASELINE_INVALID"); return
+        }
+        if (kind == LabyrinthPostEntryActionKind.SHOP_CONFIRM_REFRESH) {
+            val pending = shopRefreshTransaction.pending ?: return
+            val dialog = _state.value.lastResult?.shopRefreshDialog
+            if (pending.confirmedAt != null || dialog?.authorizesRefresh(pending.expectedFee) != true ||
+                dialog.capturedAtMillis <= pending.requestedAt) { traceReject("SHOP_REFRESH_DIALOG_INVALID"); return }
+        }
         if (!beginGuardedAction()) return
         val dispatchedEventChoiceId = expectedEventChoiceId ?: if (kind == LabyrinthPostEntryActionKind.SELECT_EVENT) {
             (_state.value.eventChoiceDecision as? LabyrinthEventChoiceDecision.Select)
@@ -8236,6 +8562,21 @@ class LabyrinthEntryRecognitionSession(
             when (actionResult) {
                 is AutomationActionResult.Executed -> {
                     lastPostEntryActionLandedAt = clock()
+                    when (kind) {
+                        LabyrinthPostEntryActionKind.SHOP_BUY_RELIC, LabyrinthPostEntryActionKind.SHOP_BUY_IMPRINT,
+                        LabyrinthPostEntryActionKind.SHOP_CONFIRM_RELIC, LabyrinthPostEntryActionKind.SHOP_CONFIRM_IMPRINT,
+                        LabyrinthPostEntryActionKind.SHOP_CLOSE_PURCHASE_COMPLETE, LabyrinthPostEntryActionKind.SHOP_REFRESH,
+                        LabyrinthPostEntryActionKind.SHOP_CONFIRM_REFRESH, LabyrinthPostEntryActionKind.SHOP_CLOSE,
+                        LabyrinthPostEntryActionKind.SHOP_CONFIRM_EXIT -> invalidateShopEvidence()
+                        LabyrinthPostEntryActionKind.CLOSE_CHARACTER_JOINED ->
+                            if (activeNodeType == LabyrinthNodeTypes.SHOP) {
+                                // Random imprints can jump directly to the joined-role receipt.
+                                // Revoke stock ordering even if PURCHASE_COMPLETE was never captured.
+                                shopScan.purchased(clock())
+                                invalidateShopEvidence()
+                            }
+                        else -> Unit
+                    }
                     if (kind == LabyrinthPostEntryActionKind.EVENT_FREE_ROLE_SELECT && eventFreeRoleCandidateId != null) {
                         eventFreeRoleSelectedCharacterIds += eventFreeRoleCandidateId
                         eventFreeRoleLastSelectAt = clock()
@@ -8372,12 +8713,20 @@ class LabyrinthEntryRecognitionSession(
                             postEntryStableFrames = 0
                             postEntryAttempts = 0
                         }
-                        LabyrinthPostEntryActionKind.SHOP_CLOSE_PURCHASE_COMPLETE -> clearPlannedShopPurchase()
+                        LabyrinthPostEntryActionKind.SHOP_CLOSE_PURCHASE_COMPLETE -> {
+                            shopScan.purchased(clock())
+                            clearPlannedShopPurchase()
+                        }
                         LabyrinthPostEntryActionKind.SHOP_REFRESH -> {
                             // The refresh button opens a second confirmation dialog.  Keep the
                             // completed-cycle count until that dialog is confirmed and fresh shop
                             // stock is visible again.
-                            shopRefreshesThisVisit++
+                            if (refreshBaseline == null || !shopRefreshTransaction.begin(clock(), refreshBaseline.coins,
+                                    refreshBaseline.visual, refreshBaseline.fee)) {
+                                finishFromPlanner(sessionId, "刷新输入已执行但缺少可信基线，停止并核账")
+                                return@launchGuardedAction
+                            }
+                            preparedShopRefresh = null
                             plannedShopRefreshStartedAt = clock()
                             plannedShopRefreshConfirmedAt = Long.MIN_VALUE
                             postEntryStableFrames = 0
@@ -8385,6 +8734,7 @@ class LabyrinthEntryRecognitionSession(
                             clearPlannedShopPurchase()
                         }
                         LabyrinthPostEntryActionKind.SHOP_CONFIRM_REFRESH -> {
+                            shopRefreshTransaction.confirmed(clock())
                             plannedShopRefreshConfirmedAt = clock()
                             postEntryStableFrames = 0
                             postEntryAttempts = 0
@@ -8490,6 +8840,10 @@ class LabyrinthEntryRecognitionSession(
         finalBossLocalizationStartedAt = Long.MIN_VALUE
         entryPhaseComplete = false
         initialStartExecuted = false
+        initial1088HandoffEvidence.reset()
+        initial1088RecoveryGate.reset()
+        initial1088EvidenceLogs.reset()
+        initial1088RecoveryLogs.reset()
         resetPendingNodeClickStability()
         resetStrongRouteTargetBinding()
         pendingNodeTransition = null
@@ -9272,7 +9626,10 @@ class LabyrinthEntryRecognitionSession(
             // erase this counter, but a recovered movement dialog represents a real new node.
             shopRelicPurchasesThisCycle = 0
             shopRefreshesThisVisit = 0
+            shopRefreshTransaction = LabyrinthShopRefreshTransaction()
+            preparedShopRefresh = null
             clearPlannedShopRefresh()
+            resetShopScrollState()
         }
         if (blockType == LabyrinthNodeTypes.BOSS) {
             bossTeamMode = configuredBossTeamMode
@@ -9308,83 +9665,56 @@ class LabyrinthEntryRecognitionSession(
         result: LabyrinthEntryFrameResult,
         timestampMillis: Long,
     ): Boolean {
-        val startedAt = plannedShopRefreshStartedAt
-        if (startedAt == Long.MIN_VALUE) return false
-
-        val elapsed = (timestampMillis - startedAt).coerceAtLeast(0L)
-        if (elapsed > SHOP_REFRESH_TRANSITION_TIMEOUT_MILLIS) {
-            clearPlannedShopRefresh()
-            if (activeSessionId == sessionId) {
-                _state.value = _state.value.copy(
-                    message = "商店刷新确认超时；未重置本轮遗物计数，等待重新识别商店",
-                )
-                overlayCoordinator.update(sessionId, buildOverlayPresentation(sessionId))
-            }
-            return false
-        }
-
-        val confirmation = result.nodeMoveConfirmation
-        if (
-            labyrinthShopRefreshConfirmationOwnsFrame(
-                activeNodeType = activeNodeType,
-                refreshStartedAt = startedAt,
-                refreshConfirmedAt = plannedShopRefreshConfirmedAt,
-                now = timestampMillis,
-                hasGenericConfirmation = confirmation != null,
-                timeoutMillis = SHOP_REFRESH_TRANSITION_TIMEOUT_MILLIS,
-            ) && confirmation != null
-        ) {
-            if (
-                lastPostEntryActionAt == Long.MIN_VALUE ||
-                timestampMillis - lastPostEntryActionAt >= POST_ENTRY_ACTION_INTERVAL_MILLIS
-            ) {
-                dispatchPostEntryTap(
-                    sessionId = sessionId,
-                    kind = LabyrinthPostEntryActionKind.SHOP_CONFIRM_REFRESH,
-                    label = "确认刷新商店",
-                    rect = confirmation.confirmButtonRect,
-                    timestampMillis = timestampMillis,
-                )
-            } else if (activeSessionId == sessionId) {
-                _state.value = _state.value.copy(message = "已识别更新确认，等待安全点击间隔")
-                overlayCoordinator.update(sessionId, buildOverlayPresentation(sessionId))
-            }
-            return true
-        }
-
-        if (plannedShopRefreshConfirmedAt != Long.MIN_VALUE) {
-            if (
-                confirmation == null &&
-                labyrinthShopRefreshCanCommit(
-                    pageState = result.observation.state,
-                    refreshStartedAt = startedAt,
-                    refreshConfirmedAt = plannedShopRefreshConfirmedAt,
-                    now = timestampMillis,
-                    settleMillis = SHOP_REFRESH_SETTLE_MILLIS,
-                    timeoutMillis = SHOP_REFRESH_TRANSITION_TIMEOUT_MILLIS,
-                )
-            ) {
+        val before = shopRefreshTransaction.pending ?: return false
+        val capturedAt = if (balancedMode) balancedDetailCapturedAt ?: Long.MIN_VALUE else timestampMillis
+        val shop = result.shopObservation?.takeIf { result.observation.state == LabyrinthEntryPageState.SHOP }
+        when (shopRefreshTransaction.observe(shop, clock(), capturedAt)) {
+            LabyrinthShopRefreshOutcome.COMMITTED -> {
+                shopRefreshesThisVisit++
                 shopRelicPurchasesThisCycle = 0
+                preparedShopRefresh = null
                 clearPlannedShopRefresh()
-                postEntryStableFrames = 0
-                postEntryAttempts = 0
-                if (activeSessionId == sessionId) {
-                    _state.value = _state.value.copy(message = "商店已刷新，等待新商品列表稳定")
-                    overlayCoordinator.update(sessionId, buildOverlayPresentation(sessionId))
-                }
+                resetShopScrollState()
+                invalidateShopEvidence()
+                _state.value = _state.value.copy(message = "刷新扣费已核验，提交第" + shopRefreshesThisVisit + "次刷新，重读新库存")
+                overlayCoordinator.update(sessionId, buildOverlayPresentation(sessionId))
                 return true
             }
-            if (activeSessionId == sessionId) {
-                _state.value = _state.value.copy(message = "已确认刷新商店，等待新商品列表返回")
-                overlayCoordinator.update(sessionId, buildOverlayPresentation(sessionId))
+            LabyrinthShopRefreshOutcome.CANCELLED -> {
+                preparedShopRefresh = null
+                clearPlannedShopRefresh()
+                finishFromPlanner(sessionId, "刷新已取消或未扣费，次数不增加；已停住，避免重复付费")
+                return true
             }
+            LabyrinthShopRefreshOutcome.UNRESOLVED -> {
+                val pending = shopRefreshTransaction.pending ?: before
+                // A resume can deliver the first paid frame after the deadline. Allow its second
+                // independent capture, but never keep an unchanging old receipt alive forever.
+                val awaitingSecondPaidFrame = pending.observedCoins == pending.coinsBefore - pending.expectedFee &&
+                    pending.stableFrames == 1 && clock() - (pending.lastCapturedAt ?: 0L) in 0..3_000L
+                if (!awaitingSecondPaidFrame) {
+                    finishFromPlanner(sessionId, "刷新结果无法核实，次数未提交：" + pending.reason)
+                    return true
+                }
+            }
+            LabyrinthShopRefreshOutcome.WAIT -> Unit
+        }
+        val pending = shopRefreshTransaction.pending ?: return true
+        val confirmation = result.nodeMoveConfirmation
+        val dialog = result.shopRefreshDialog
+        if (confirmation != null && pending.confirmedAt == null &&
+            pending.phase == LabyrinthShopRefreshPhase.REQUESTED &&
+            dialog?.authorizesRefresh(pending.expectedFee) == true && dialog.capturedAtMillis > pending.requestedAt) {
+            if (lastPostEntryActionAt == Long.MIN_VALUE || timestampMillis - lastPostEntryActionAt >= POST_ENTRY_ACTION_INTERVAL_MILLIS) {
+                dispatchPostEntryTap(sessionId, LabyrinthPostEntryActionKind.SHOP_CONFIRM_REFRESH,
+                    "确认刷新商店（" + pending.expectedFee + "金币，弹窗语义已核对）", confirmation.confirmButtonRect, timestampMillis)
+            }
+        } else if (dialog?.kind == com.landosol.toolbox.labyrinth.vision.LabyrinthShopRefreshDialogKind.EXIT && dialog.confirmed) {
+            finishFromPlanner(sessionId, "检测到退出确认而非更新确认，停止并保留刷新事务，未增加次数")
             return true
         }
-
-        if (activeSessionId == sessionId) {
-            _state.value = _state.value.copy(message = "已点击用300更新，等待更新确认弹窗")
-            overlayCoordinator.update(sessionId, buildOverlayPresentation(sessionId))
-        }
+        _state.value = _state.value.copy(message = "刷新事务未结算（已用" + shopRefreshesThisVisit + "次）：" + pending.reason)
+        overlayCoordinator.update(sessionId, buildOverlayPresentation(sessionId))
         return true
     }
 
@@ -10361,6 +10691,13 @@ class LabyrinthEntryRecognitionSession(
                         if (plannedShopPurchaseStartedAt != Long.MIN_VALUE) {
                             add("锁定购买目标（等待交易结果）：${pendingShopPurchase?.displayName ?: plannedShopPurchaseRelicId ?: plannedShopRoleImprintLabel ?: "确认中"}")
                         }
+                        add("商店扫描诊断：" + shopScan.diagnostics().entries.joinToString(" · ") { it.key + "=" + it.value })
+                        add("商店金币：" + (if (shop.coinBalanceConfirmed) shop.coinBalance?.toString() else "未确认"))
+                        shopRefreshTransaction.pending?.let { receipt ->
+                            add("商店刷新回执：已提交" + shopRefreshesThisVisit + "次 · 待确认费用" + receipt.expectedFee +
+                                " · 前余额" + receipt.coinsBefore + " · 后余额" + receipt.observedCoins +
+                                " · " + receipt.phase + " · 稳定帧" + receipt.stableFrames + " · " + receipt.reason)
+                        }
                         currentShopDecision(result)?.takeIf { plannedShopPurchaseStartedAt == Long.MIN_VALUE }?.let { decision ->
                             add(
                                 "商店策略：" + when (decision) {
@@ -10981,6 +11318,53 @@ class LabyrinthEntryRecognitionSession(
                 ":template=${classification.templateId}"
         }.ifBlank { "none" }
 
+    private fun logInitial1088Refinement(result: LabyrinthEntryFrameResult, timestampMillis: Long) {
+        if (result.observation.state != LabyrinthEntryPageState.INITIAL_CHARACTER_SELECTION) {
+            initial1088RecoveryGate.reset()
+            initial1088EvidenceLogs.reset()
+            initial1088RecoveryLogs.reset()
+            return
+        }
+        result.openingCharacterMatches.forEach { match ->
+            val evidence = match.initial1088RefinementEvidence ?: return@forEach
+            val context = result.initial1088RefinementContext
+            val key = labyrinthInitial1088RefinementLogKey(result.openingCharacterSelection?.viewportRevision, context, evidence)
+            if (initial1088EvidenceLogs.accept(key, match.slotId)) {
+                nodeLog("initial-1088-refinement 精修 frame=" + (context?.frameSequence ?: 0) +
+                    " capturedAt=" + timestampMillis + " viewport=" + result.openingCharacterSelection?.viewportRevision +
+                    " " + com.landosol.toolbox.labyrinth.debug.labyrinthInitial1088RefinementPayload(match.slotId, evidence, context))
+            }
+        }
+    }
+
+    private fun holdInitial1088Recovery(result: LabyrinthEntryFrameResult, timestampMillis: Long): Boolean {
+        if (result.observation.state != LabyrinthEntryPageState.INITIAL_CHARACTER_SELECTION ||
+            !com.landosol.toolbox.labyrinth.vision.labyrinthOpeningRosterOwnsInitialSelection(result.observation.anchorScores) ||
+            labyrinthIsRoleRewardPage(result)) return false
+        val eligible = synchronized(actionPlannerLock) {
+            actionPlanner?.shouldDeferInitial1088Fallback(result.openingCharacterMatches) == true
+        }
+        val currentContext = initial1088RefinementContext()
+        val evidence = result.openingCharacterMatches.firstOrNull { !it.trusted && it.suspectedCharacterId == "1088" }
+            ?.initial1088RefinementEvidence
+        val diagnostic = initial1088RecoveryGate.evaluate(eligible, timestampMillis,
+            result.initial1088RefinementContext, currentContext, evidence)
+        if (eligible || diagnostic.waitedMillis > 0) {
+            _state.value = _state.value.copy(initial1088Recovery = diagnostic)
+            val key = listOf(diagnostic.status, diagnostic.reason, result.openingCharacterSelection?.viewportRevision,
+                currentContext.reason).joinToString("|")
+            if (initial1088RecoveryLogs.accept(key)) {
+                nodeLog("initial-1088-recovery 恢复 frame=" + (result.initial1088RefinementContext?.frameSequence ?: 0) +
+                    " capturedAt=" + timestampMillis + " status=" + diagnostic.status + " reason=" + diagnostic.reason +
+                    " waitedMillis=" + diagnostic.waitedMillis + " requiredNewerThan=" + diagnostic.requiredNewerThanMillis)
+            }
+        }
+        if (diagnostic.shouldWait) {
+            _state.value = _state.value.copy(message = "疑似新年优衣，开局权限已恢复，等待新帧精修后再决定替补")
+        }
+        return diagnostic.shouldWait
+    }
+
     private fun nodeLog(message: String, warning: Boolean = false) {
         runCatching {
             if (warning) Log.w(NODE_LOG_TAG, message) else Log.d(NODE_LOG_TAG, message)
@@ -11032,6 +11416,11 @@ class LabyrinthEntryRecognitionSession(
         /** Lost-tap retries allowed on a single-pick choice page before the run stops. */
         const val MAX_SELECTION_COMMIT_ATTEMPTS = 3
         const val SHOP_PURCHASE_TRANSITION_TIMEOUT_MILLIS = 8_000L
+        // Shop list paging (swipe up to reveal the lower goods row). 1280x720: x~1053, y 507->280.
+        const val SHOP_SWIPE_X_RATIO = 0.823f
+        const val SHOP_SWIPE_TOP_Y_RATIO = 0.389f
+        const val SHOP_SWIPE_BOTTOM_Y_RATIO = 0.704f
+        const val SHOP_SCROLL_DURATION_MILLIS = 360L
         /**
          * 确认弹窗关闭后，要连续看到这么多帧「商店 + 无弹窗」才认定是用户取消。
          * 买到东西时游戏会先闪一帧商店再弹「购买完成」，设成 1 会误判并把购买计划清掉。
