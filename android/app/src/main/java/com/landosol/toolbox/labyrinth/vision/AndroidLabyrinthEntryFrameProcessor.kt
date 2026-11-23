@@ -248,6 +248,7 @@ class AndroidLabyrinthEntryFrameProcessor private constructor(
     private val relicEvidenceVersion: () -> Long,
     private val relicVerificationMarks: () -> Set<String>,
     private val shopEvidenceVersion: () -> Long,
+    private val shopOcrPolicy: () -> LabyrinthShopOcrPolicy,
 ) {
     private var lastShopEvidenceVersion: Long? = null
 
@@ -260,19 +261,33 @@ class AndroidLabyrinthEntryFrameProcessor private constructor(
             shopRefreshResolver.clear()
             lastShopEvidenceVersion = shopVersion
         }
+        val coreShopPolicy = shopOcrPolicy()
         val pixels = capturedFramePixelImage(frame)
         val result = processor.process(
             pixels,
             deferRoleRewardPortraits = true,
             skipJoinedCharacters = skipJoinedCharacters(),
+            deferShopStock = coreShopPolicy.phase != LabyrinthShopOcrPhase.STOCK ||
+                !coreShopPolicy.accepts(frame.timestampMillis, shopVersion),
         )
         val resolvedStarted = System.nanoTime()
         val exResolved = exEncounterResolver.resolve(frame.bitmap, result)
         val exResolvedAt = System.nanoTime()
         val eventResolved = eventChoiceResolver?.resolve(frame.bitmap, exResolved) ?: exResolved
-        val shopResolved = shopItemResolver.resolve(frame.bitmap, eventResolved)
-        val coinResolved = shopCoinResolver.resolve(frame.bitmap, shopResolved)
-        val dialogResolved = shopRefreshResolver.resolve(frame.bitmap, coinResolved, frame.timestampMillis)
+        val liveShopPolicy = shopOcrPolicy()
+        val connecting = (result.anchorMatches[EntryAnchorId.DATA_CONNECTING]?.score ?: 0.0) >= 0.55
+        val shopPlan = liveShopPolicy.plan(frame.timestampMillis, shopVersion, connecting, result.nodeMoveConfirmation != null)
+        val shopInput = if (liveShopPolicy.accepts(frame.timestampMillis, shopVersion) && !connecting) eventResolved
+            else eventResolved.copy(shopObservation = null, shopRefreshDialog = null)
+        if (!shopPlan.titles) shopItemResolver.clear()
+        if (!shopPlan.wallet) shopCoinResolver.clear(maxOf(liveShopPolicy.capturedAfter, frame.timestampMillis))
+        if (!shopPlan.dialog) shopRefreshResolver.clear()
+        fun shopRequestCurrent() = shopOcrPolicy() == liveShopPolicy && liveShopPolicy.accepts(frame.timestampMillis, shopVersion)
+        val dialogResolved = shopPlan.apply(shopInput,
+            readTitles = { current -> if (shopRequestCurrent()) shopItemResolver.resolve(frame.bitmap, current, ::shopRequestCurrent) else current },
+            readWallet = { current -> if (shopRequestCurrent()) shopCoinResolver.resolve(frame.bitmap, current, frame.timestampMillis, ::shopRequestCurrent) else current },
+            readDialog = { current -> if (shopRequestCurrent()) shopRefreshResolver.resolve(frame.bitmap, current, frame.timestampMillis, ::shopRequestCurrent) else current },
+        )
         val roleResolved = roleRewardNameResolver.resolve(frame.bitmap, dialogResolved)
         val relicStarted = System.nanoTime()
         val evidenceVersion = relicEvidenceVersion()
@@ -285,8 +300,8 @@ class AndroidLabyrinthEntryFrameProcessor private constructor(
         val finished = System.nanoTime()
         return resolved.copy(
             // A scroll/purchase/refresh invalidated this frame while recognition was in flight.
-            shopObservation = resolved.shopObservation.takeIf { shopEvidenceVersion() == shopVersion },
-            shopRefreshDialog = resolved.shopRefreshDialog.takeIf { shopEvidenceVersion() == shopVersion },
+            shopObservation = resolved.shopObservation.takeIf { shopEvidenceVersion() == shopVersion && shopRequestCurrent() },
+            shopRefreshDialog = resolved.shopRefreshDialog.takeIf { shopEvidenceVersion() == shopVersion && shopRequestCurrent() },
             relicEvidenceVersion = evidenceVersion,
             elapsedMillis = (finished - started) / 1_000_000,
             stageMillis = result.stageMillis + mapOf(
@@ -324,6 +339,7 @@ class AndroidLabyrinthEntryFrameProcessor private constructor(
             eventCustomizationEnabled: Boolean = false,
             allowInitial1088GeometryRefinement: () -> Boolean = { false },
             shopEvidenceVersion: () -> Long = { 0 },
+            shopOcrPolicy: () -> LabyrinthShopOcrPolicy = { LabyrinthShopOcrPolicy(evidenceVersion = shopEvidenceVersion()) },
         ): AndroidLabyrinthEntryFrameProcessor {
             val entryTemplates = AndroidLabyrinthEntryTemplateLoader(context).load()
             val preScaledTemplates = captureFrameSize()?.let { (width, height) ->
@@ -385,6 +401,7 @@ class AndroidLabyrinthEntryFrameProcessor private constructor(
                 relicEvidenceVersion = relicEvidenceVersion,
                 relicVerificationMarks = relicVerificationMarks,
                 shopEvidenceVersion = shopEvidenceVersion,
+                shopOcrPolicy = shopOcrPolicy,
             )
         }
     }

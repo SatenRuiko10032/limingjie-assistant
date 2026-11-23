@@ -295,6 +295,8 @@ class LandosolToolboxApplication : Application() {
                         val snapshot = com.landosol.toolbox.labyrinth.LabyrinthBalancedVisionContext.current()
                         snapshot?.shopEvidenceVersion ?: labyrinthEntryRecognitionSession.shopEvidenceVersion
                     },
+                    // Unlike the frozen vision snapshot, OCR admission must see action changes immediately.
+                    shopOcrPolicy = { labyrinthEntryRecognitionSession.shopOcrPolicy },
                     relicVerificationMarks = {
                         val snapshot = com.landosol.toolbox.labyrinth.LabyrinthBalancedVisionContext.current()
                         if (snapshot != null) snapshot.relicVerificationMarks else labyrinthEntryRecognitionSession.relicVerificationMarks

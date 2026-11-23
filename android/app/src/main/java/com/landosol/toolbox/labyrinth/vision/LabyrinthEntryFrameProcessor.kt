@@ -493,6 +493,7 @@ class LabyrinthEntryFrameProcessor(
         frame: PixelImage,
         deferRoleRewardPortraits: Boolean = false,
         skipJoinedCharacters: Boolean = false,
+        deferShopStock: Boolean = false,
     ): LabyrinthEntryFrameResult {
         if (frame.width <= frame.height) return unsupportedOrientation(frame)
         // The frame-wide luminance/gradient maps cost one pass over the frame and are then read by
@@ -503,7 +504,7 @@ class LabyrinthEntryFrameProcessor(
         // frame identity anyway.
         try {
             matcher.prepareFrame(frame)
-            return processPrepared(frame, deferRoleRewardPortraits, skipJoinedCharacters)
+            return processPrepared(frame, deferRoleRewardPortraits, skipJoinedCharacters, deferShopStock)
         } finally {
             matcher.clearPreparedFrame()
         }
@@ -513,6 +514,7 @@ class LabyrinthEntryFrameProcessor(
         frame: PixelImage,
         deferRoleRewardPortraits: Boolean,
         skipJoinedCharacters: Boolean,
+        deferShopStock: Boolean,
     ): LabyrinthEntryFrameResult {
         lateinit var observation: LabyrinthEntryPageObservation
         var matchedFeatures = emptyList<String>()
@@ -695,6 +697,7 @@ class LabyrinthEntryFrameProcessor(
                 shopObservation = shopRecognizer.recognize(
                     frame = frame,
                     dialogState = observation.state.toShopDialogState(),
+                    deferStockRecognition = deferShopStock || anchorScores[EntryAnchorId.DATA_CONNECTING] >= 0.55,
                 )
             }
             matchedFeatures = scores.entries

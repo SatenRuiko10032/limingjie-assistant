@@ -51,6 +51,8 @@ import com.landosol.toolbox.labyrinth.vision.LabyrinthBattleTeamRecognitionState
 import com.landosol.toolbox.labyrinth.vision.LabyrinthRelicMatch
 import com.landosol.toolbox.labyrinth.vision.labyrinthRelicDetailHoldsFrame
 import com.landosol.toolbox.labyrinth.vision.LabyrinthShopDialogState
+import com.landosol.toolbox.labyrinth.vision.LabyrinthShopOcrPolicy
+import com.landosol.toolbox.labyrinth.vision.LabyrinthShopOcrPhase
 import com.landosol.toolbox.labyrinth.vision.LabyrinthShopItemKind
 import com.landosol.toolbox.labyrinth.vision.LabyrinthShopCategoryState
 import com.landosol.toolbox.labyrinth.vision.LabyrinthShopObservation
@@ -1673,6 +1675,8 @@ class LabyrinthEntryRecognitionSession(
     @Volatile var shopEvidenceVersion: Long = 0
         private set
     @Volatile private var shopRequiredCapturedAfter = Long.MIN_VALUE
+    @Volatile var shopOcrPolicy = LabyrinthShopOcrPolicy()
+        private set
     @Volatile
     private var pendingRelicSelection: LabyrinthRelicMatch? = null
     @Volatile
@@ -2166,6 +2170,7 @@ class LabyrinthEntryRecognitionSession(
         preparedShopRefresh = null
         shopRequiredCapturedAfter = Long.MIN_VALUE
         shopEvidenceVersion++
+        publishShopOcrPolicy()
         resetShopScrollState()
         pendingRelicSelection = null
         relicChoiceCommitted = false
@@ -2457,6 +2462,7 @@ class LabyrinthEntryRecognitionSession(
         scope = actionScope, fastProcessor = fastProcessor, detailProcessor = processor,
         admitted = { activeSessionId == sessionId && _state.value.running && !_state.value.paused &&
             !manualPauseRequested.get() && !stopRequested.get() },
+        detailAdmitted = { frame -> frame.timestampMillis > shopRequiredCapturedAfter },
         snapshot = ::balancedVisionSnapshot,
         observe = { fast -> observeBalancedFast(sessionId, fast) },
         deliver = { frameLease, request, completed ->
@@ -2663,6 +2669,7 @@ class LabyrinthEntryRecognitionSession(
         val frameGeneration = roleDecisionGeneration.get()
         val frameShopVersion = shopEvidenceVersion
         runCatching {
+            if (frame.timestampMillis <= shopRequiredCapturedAfter) return@runCatching
             lastNodeScanHoldReason = null
             lastNodeScanQueryTimestampMillis = null
             val refinementContext = initial1088RefinementContext().copy(
@@ -5255,10 +5262,24 @@ class LabyrinthEntryRecognitionSession(
         shopScan.reset()
     }
 
+    private fun publishShopOcrPolicy() {
+        val pending = shopRefreshTransaction.pending
+        shopOcrPolicy = LabyrinthShopOcrPolicy(
+            evidenceVersion = shopEvidenceVersion,
+            capturedAfter = shopRequiredCapturedAfter,
+            phase = when {
+                pending == null -> LabyrinthShopOcrPhase.STOCK
+                pending.confirmedAt != null -> LabyrinthShopOcrPhase.REFRESH_RECEIPT
+                else -> LabyrinthShopOcrPhase.REFRESH_DIALOG
+            },
+        )
+    }
+
     /** Called only AFTER an input landed, so the executor's own freshness check is not self-rejected. */
     private fun invalidateShopEvidence(settleMillis: Long = LabyrinthShopScanController.SETTLE_MILLIS) {
         shopEvidenceVersion++
         shopRequiredCapturedAfter = clock() + settleMillis
+        publishShopOcrPolicy()
         clearQueuedFrame()
         if (balancedMode) {
             balancedRequiredCapturedAfter = maxOf(balancedRequiredCapturedAfter, shopRequiredCapturedAfter)
@@ -8727,6 +8748,7 @@ class LabyrinthEntryRecognitionSession(
                                 return@launchGuardedAction
                             }
                             preparedShopRefresh = null
+                            publishShopOcrPolicy()
                             plannedShopRefreshStartedAt = clock()
                             plannedShopRefreshConfirmedAt = Long.MIN_VALUE
                             postEntryStableFrames = 0
@@ -8735,6 +8757,7 @@ class LabyrinthEntryRecognitionSession(
                         }
                         LabyrinthPostEntryActionKind.SHOP_CONFIRM_REFRESH -> {
                             shopRefreshTransaction.confirmed(clock())
+                            publishShopOcrPolicy()
                             plannedShopRefreshConfirmedAt = clock()
                             postEntryStableFrames = 0
                             postEntryAttempts = 0
@@ -9627,6 +9650,7 @@ class LabyrinthEntryRecognitionSession(
             shopRelicPurchasesThisCycle = 0
             shopRefreshesThisVisit = 0
             shopRefreshTransaction = LabyrinthShopRefreshTransaction()
+            publishShopOcrPolicy()
             preparedShopRefresh = null
             clearPlannedShopRefresh()
             resetShopScrollState()

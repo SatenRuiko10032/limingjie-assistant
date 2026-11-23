@@ -109,6 +109,28 @@ class LabyrinthShopViewportRecognitionTest {
         assertTrue(clipped.items.any { it.visibility == LabyrinthShopItemVisibility.UNRESOLVED })
     }
 
+    @Test fun `deferred stock keeps goods pixels but cannot authorize inventory or payment`() {
+        val templateFile = generateSequence(File(".").canonicalFile, File::getParentFile)
+            .flatMap { sequenceOf(File(it, "app/src/main/assets/resource-packs/cn-bilibili/vision/shop/shop_buy_button.png"),
+                File(it, "android/app/src/main/assets/resource-packs/cn-bilibili/vision/shop/shop_buy_button.png")) }
+            .first { it.isFile }
+        val recognizer = LabyrinthShopRecognizer(buyButtonTemplate = pixelImage(templateFile))
+        val frame = shopFrame()
+        val stock = recognizer.recognize(frame)
+        assertTrue(stock.layoutReady); assertTrue(stock.items.isNotEmpty())
+        val deferred = recognizer.recognize(frame, deferStockRecognition = true)
+        assertTrue(deferred.items.isEmpty()); assertFalse(deferred.layoutReady)
+        assertEquals(stock.visualFingerprint, deferred.visualFingerprint)
+        assertNull(deferred.coinBalance); assertFalse(deferred.coinBalanceConfirmed)
+        assertNull(deferred.purchaseCandidate); assertNull(deferred.viewport)
+        assertFalse(deferred.refreshButtonEnabled)
+        val modal = recognizer.recognize(frame, LabyrinthShopDialogState.PURCHASE_CONFIRMATION,
+            deferStockRecognition = true)
+        assertEquals(LabyrinthShopDialogState.PURCHASE_CONFIRMATION, modal.dialogState)
+        assertEquals(0L, modal.visualFingerprint); assertNull(modal.purchaseCandidate)
+        assertEquals("ordinary stock resumes unchanged after receipt", stock, recognizer.recognize(frame))
+    }
+
     private fun translateList(source: PixelImage, dy: Int): PixelImage {
         val output = source.copy(pixels = source.pixels.copyOf())
         val clip = requireNotNull(LabyrinthShopVisibleLayout.clip(source))

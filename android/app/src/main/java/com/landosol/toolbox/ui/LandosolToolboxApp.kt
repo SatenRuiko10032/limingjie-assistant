@@ -66,6 +66,8 @@ import com.landosol.toolbox.account.AccountViewModel
 import com.landosol.toolbox.automation.accessibility.AccessibilityConnectionRegistry
 import com.landosol.toolbox.automation.accessibility.LandosolAccessibilityService
 import com.landosol.toolbox.labyrinth.LabyrinthEntryRecognitionSessionState
+import com.landosol.toolbox.labyrinth.LabyrinthRuntimeEnvironment
+import com.landosol.toolbox.labyrinth.labyrinthDisplayRequirementWarning
 import com.landosol.toolbox.labyrinth.LabyrinthUiState
 import com.landosol.toolbox.labyrinth.LabyrinthController
 import com.landosol.toolbox.ui.account.AccountScreen
@@ -122,6 +124,22 @@ fun LandosolToolboxApp() {
         AppThemeMode.SYSTEM -> isSystemInDarkTheme()
         AppThemeMode.LIGHT -> false
         AppThemeMode.DARK -> true
+    }
+    // Use Application resources, not Activity resources: MainActivity overrides the UI density
+    // for its 960dp layout, while this check must inspect the real system display profile.
+    var startupDisplayWarning by remember(application) {
+        mutableStateOf(
+            application.resources.displayMetrics.let { metrics ->
+                labyrinthDisplayRequirementWarning(
+                    LabyrinthRuntimeEnvironment(
+                        widthPixels = metrics.widthPixels,
+                        heightPixels = metrics.heightPixels,
+                        densityDpi = metrics.densityDpi,
+                        availableProcessors = Runtime.getRuntime().availableProcessors(),
+                    ),
+                )
+            },
+        )
     }
     val view = LocalView.current
     SideEffect {
@@ -344,6 +362,14 @@ fun LandosolToolboxApp() {
             ) { outerPadding ->
                 destinationContent(Modifier.padding(outerPadding).consumeWindowInsets(outerPadding))
             }
+        }
+        startupDisplayWarning?.let { warning ->
+            AlertDialog(
+                onDismissRequest = {},
+                title = { Text("运行环境不符合要求") },
+                text = { Text(warning) },
+                confirmButton = {},
+            )
         }
     }
 }
