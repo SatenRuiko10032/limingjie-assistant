@@ -30,6 +30,7 @@ class Batch5SessionFramePipelineTest {
         val makeSnapshot: (Frame) -> LabyrinthBalancedVisionContext.RequestSnapshot,
         val onDeliver: suspend (RefCountedFrameLease<Frame>) -> Unit = {},
         val failFastId: Int? = null,
+        val detailAdmission: (Frame) -> Boolean = { true },
     ) {
         val scope = CoroutineScope(SupervisorJob() + LabyrinthFourThreadRuntime.controlDispatcher)
         val disposedIds = ConcurrentLinkedQueue<Int>()
@@ -83,6 +84,7 @@ class Batch5SessionFramePipelineTest {
             },
             changed = { if (!admitted && !pipeline.detailActive && !pipeline.actorBusy) quiesced.complete(Unit) },
             intervalMillis = { 300L }, timestampMillis = { it.timestamp }, workerClock = { 77L },
+            detailAdmitted = { frame -> assertTrue(LabyrinthFourThreadRuntime.isControlThread()); detailAdmission(frame) },
             recycle = { frame -> assertTrue(frame.disposed.compareAndSet(false, true)); disposedIds += frame.id },
         ) }
         suspend fun offerObserved(id: Int): Frame {
@@ -101,6 +103,39 @@ class Batch5SessionFramePipelineTest {
         suspend fun close() = withContext(LabyrinthFourThreadRuntime.controlDispatcher) {
             admitted = false; pipeline.close()
         }
+    }
+
+    @Test fun `stale captures and failed admission never reach snapshots or CPU detail`() = runBlocking {
+        System.getProperty("refreshTestProcessors")?.toInt()?.let { processors ->
+            assertEquals(processors, LabyrinthFourThreadRuntime.availableProcessors)
+            assertEquals(if (processors >= 6) 6 else 4, LabyrinthFourThreadRuntime.businessThreadBudget)
+        }
+        var capturedAfter = 600L
+        val snapshots = mutableListOf<Int>()
+        val fixture = Fixture(detail = { full() }, makeSnapshot = { frame -> snapshots += frame.id; snapshot() },
+            detailAdmission = { frame -> if (frame.id == 6) error("admission") else frame.timestamp > capturedAfter })
+        try {
+            fixture.offerObserved(1); fixture.offerObserved(2)
+            withContext(control) {
+                assertTrue(snapshots.isEmpty()); assertTrue(fixture.detailedIds.isEmpty())
+                assertTrue(fixture.deliveredIds.isEmpty()); assertFalse(fixture.pipeline.detailActive)
+            }
+            fixture.offerObserved(3); fixture.delivered(3)
+            withContext(control) { capturedAfter = 1_200L }
+            fixture.offerObserved(4)
+            fixture.offerObserved(5); fixture.delivered(5)
+            fixture.offerObserved(6); fixture.failed("admission")
+            fixture.offerObserved(7); fixture.delivered(7)
+            withContext(control) {
+                assertEquals((1..7).toList(), fixture.observedIds)
+                assertEquals(listOf(3, 5, 7), snapshots)
+                assertEquals(listOf(3, 5, 7), fixture.detailedIds.toList())
+                assertEquals(listOf(3, 5, 7), fixture.deliveredIds)
+                assertFalse(fixture.pipeline.detailActive); assertFalse(fixture.pipeline.actorBusy)
+            }
+        } finally { fixture.close(); withTimeout(4000) { fixture.quiesced.await() } }
+        assertEquals((1..7).toSet(), fixture.disposedIds.toSet())
+        assertEquals(7, fixture.disposedIds.size)
     }
 
     @Test fun `actual fast observations continue while CPU detail is held and pending remains latest only`() = runBlocking {

@@ -18,13 +18,17 @@ class AndroidLabyrinthShopItemResolver(
     }
 
     @Synchronized
-    fun resolve(bitmap: Bitmap, result: LabyrinthEntryFrameResult): LabyrinthEntryFrameResult {
+    fun resolve(bitmap: Bitmap, result: LabyrinthEntryFrameResult,
+        requestCurrent: () -> Boolean = { true },
+    ): LabyrinthEntryFrameResult {
+        if (!requestCurrent()) { clear(); return result.copy(shopObservation = null) }
         if (result.observation.state != LabyrinthEntryPageState.SHOP) {
             clear()
             return result
         }
         val shop = result.shopObservation ?: return result
         val items = shop.items.map { item ->
+            if (!requestCurrent()) { clear(); return result.copy(shopObservation = null) }
             item.skipOcrIfButtonUnknown()?.let { unknown ->
                 // Non-FULL/unknown controls do not consume OCR or reuse pre-scroll title evidence.
                 // FULL UNKNOWN remains READING so the controller requests another recognition.
@@ -53,7 +57,8 @@ class AndroidLabyrinthShopItemResolver(
                 height = minOf(bitmap.height - maxOf(0, titleRect.top - 3), titleRect.height + 6),
             ) else titleRect
             val read = ocr.read(bitmap, "shop-title-${item.slotId}-$variant", rect,
-                scale = if (variant == 0) 2 else 3)
+                scale = if (variant == 0) 2 else 3, requestCurrent = requestCurrent)
+            if (!requestCurrent()) { clear(); return result.copy(shopObservation = null) }
             val resolved = categories.resolve(item, read?.text, read?.id, attempt)
             val labelPending = categories.needsRoleName(resolved) &&
                 categories.labelGraceOpen(item.slotId, now)
@@ -81,9 +86,9 @@ class AndroidLabyrinthShopItemResolver(
     private companion object {
         val STANDARD_REFERENCE = EntryReferenceSize(1920, 1080)
         val TITLE_RECTS = mapOf(
-            "shop_item_1" to EntryReferenceRect(125, 230, 390, 55),
-            "shop_item_2" to EntryReferenceRect(703, 230, 390, 55),
-            "shop_item_3" to EntryReferenceRect(1278, 230, 390, 55),
+            "shop_item_1" to EntryReferenceRect(125, 240, 390, 55),
+            "shop_item_2" to EntryReferenceRect(703, 240, 390, 55),
+            "shop_item_3" to EntryReferenceRect(1278, 240, 390, 55),
             "shop_item_4" to EntryReferenceRect(125, 513, 390, 55),
             "shop_item_5" to EntryReferenceRect(703, 513, 390, 55),
             "shop_item_6" to EntryReferenceRect(1278, 513, 390, 55),

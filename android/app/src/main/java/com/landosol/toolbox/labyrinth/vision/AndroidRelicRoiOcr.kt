@@ -3,16 +3,24 @@ package com.landosol.toolbox.labyrinth.vision
 import android.graphics.Bitmap
 
 /** Owns only one crop; the OCR callback, not a timer, releases it. */
-internal class AndroidRelicRoiOcr(private val submit: (Bitmap, (String?) -> Unit) -> Unit, maximumAttempts: Int = 2) {
+internal class AndroidRelicRoiOcr(
+    private val submit: (Bitmap, (String?) -> Unit) -> Unit,
+    maximumAttempts: Int = 2,
+    private val stopWhen: (RelicOcrScheduler.Read) -> Boolean = { false },
+) {
     private val scheduler = RelicOcrScheduler({ android.os.SystemClock.elapsedRealtime() }, maximumAttempts = maximumAttempts)
     fun clear() = scheduler.clear()
 
     /** See [RelicOcrScheduler.lastCompletionAt]. */
     fun lastCompletionAt(): Long = scheduler.lastCompletionAt()
 
-    fun read(bitmap: Bitmap, slot: String, rect: EntryPixelRect, scale: Int = 1, capturedAtMillis: Long = Long.MIN_VALUE): RelicOcrScheduler.Read? {
+    fun read(bitmap: Bitmap, slot: String, rect: EntryPixelRect, scale: Int = 1,
+        capturedAtMillis: Long = Long.MIN_VALUE, requestCurrent: () -> Boolean = { true },
+    ): RelicOcrScheduler.Read? {
+        if (!requestCurrent()) { clear(); return null }
         val fingerprint = relicRoiFingerprint(bitmap, rect)
         val cached = scheduler.cached(slot, fingerprint)
+        if (cached != null && stopWhen(cached)) return cached
         val ticket = scheduler.request(slot, fingerprint, capturedAtMillis) ?: return cached
         val diagnosticId = RelicRoiOcrTelemetry.requested(slot, capturedAtMillis, android.os.SystemClock.elapsedRealtime())
         var input: Bitmap? = null
@@ -24,14 +32,27 @@ internal class AndroidRelicRoiOcr(private val submit: (Bitmap, (String?) -> Unit
                 if (input !== crop) crop.recycle()
             }
             val owned = requireNotNull(input)
-            submit(owned) { text ->
-                try {
-                    scheduler.complete(ticket, text)
-                } finally {
-                    RelicRoiOcrTelemetry.completed(diagnosticId, android.os.SystemClock.elapsedRealtime(), text?.length)
-                    if (!owned.isRecycled) owned.recycle()
-                }
-            }
+            val submitted = submitLabyrinthShopOcrIfCurrent(owned, requestCurrent,
+                submit = { current -> submit(current) { text ->
+                    try {
+                        scheduler.complete(ticket, text)
+                    } finally {
+                        RelicRoiOcrTelemetry.completed(diagnosticId, android.os.SystemClock.elapsedRealtime(), text?.length)
+                        if (!current.isRecycled) current.recycle()
+                    }
+                } },
+                discard = { rejected ->
+                    try {
+                        clear()
+                        scheduler.complete(ticket, null) // Unsubmitted input; not a timed-out physical request.
+                    } finally {
+                        RelicRoiOcrTelemetry.completed(diagnosticId, android.os.SystemClock.elapsedRealtime(), null)
+                        if (!rejected.isRecycled) rejected.recycle()
+                    }
+                },
+            )
+            input = null
+            if (!submitted) return null
         } catch (failure: Exception) {
             scheduler.complete(ticket, null)
             RelicRoiOcrTelemetry.completed(diagnosticId, android.os.SystemClock.elapsedRealtime(), null)

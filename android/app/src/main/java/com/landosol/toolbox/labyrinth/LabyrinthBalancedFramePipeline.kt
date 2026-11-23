@@ -55,6 +55,7 @@ internal class LabyrinthBalancedFramePipeline<F : Any>(
     private val recycle: (F) -> Unit,
     private val timestampMillis: (F) -> Long,
     private val workerClock: () -> Long,
+    private val detailAdmitted: (F) -> Boolean = { true },
 ) {
     private val mailbox = LabyrinthBalancedMailbox<F>()
     private val observationScheduled = AtomicBoolean(false)
@@ -142,6 +143,12 @@ internal class LabyrinthBalancedFramePipeline<F : Any>(
         if (closed || !admitted() || active != null || actorBusy) return
         val input = pending ?: return
         pending = null
+        // Refuse action-transition captures before they can submit any asynchronous OCR.
+        try {
+            if (!detailAdmitted(input.value)) { input.close(); return }
+        } catch (error: Throwable) {
+            input.close(); failure(error); return
+        }
         if (lastDetailAt != Long.MIN_VALUE && timestampMillis(input.value) - lastDetailAt < intervalMillis()) {
             input.close(); return
         }

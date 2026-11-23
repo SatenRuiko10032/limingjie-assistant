@@ -89,6 +89,8 @@ object LabyrinthShopItemText {
         .replace('記', '记')
         .replace('紀', '记')
         .replace('纪', '记')
+        // Live shop OCR can misread "干扰型" as "千扰型"; only correct the full role prefix.
+        .replace("千扰型职能", "干扰型职能")
         .let { value ->
             // A single substitution is allowed only inside a complete, known imprint title.
             // Do not globally replace OCR characters in ordinary relic names.
@@ -196,7 +198,20 @@ class LabyrinthShopRecognizer(
     fun recognize(
         frame: PixelImage,
         dialogState: LabyrinthShopDialogState = LabyrinthShopDialogState.NONE,
+        deferStockRecognition: Boolean = false,
     ): LabyrinthShopObservation {
+        if (deferStockRecognition) {
+            // Pending refresh needs only goods-pixel evidence and the separate wallet resolver.
+            // An unread inventory is never an empty shop and never a payment-success fallback.
+            return LabyrinthShopObservation(
+                items = emptyList(),
+                layoutReady = false,
+                dialogState = dialogState,
+                visualFingerprint = if (dialogState == LabyrinthShopDialogState.NONE) {
+                    LabyrinthShopViewportRecognition.visualFingerprint(frame)
+                } else 0,
+            )
+        }
         val fixedSlots = (TOP_ROW_SLOTS + BOTTOM_ROW_SLOTS).map { slot ->
             LabyrinthShopLayoutSlot(slot.id, map(frame, slot.cardRect), map(frame, slot.buyButtonRect),
                 map(frame, slot.iconRect), map(frame, requireNotNull(LabyrinthShopVisibleLayout.TITLE_RECTS[slot.id])))

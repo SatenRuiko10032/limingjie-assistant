@@ -6,15 +6,22 @@ import android.graphics.Bitmap
 class AndroidLabyrinthShopRefreshResolver(
     submitTextRead: (Bitmap, (String?) -> Unit) -> Unit = AndroidChineseRoleNameOcr::readAsync,
 ) {
-    private val ocr = AndroidRelicRoiOcr(submitTextRead, maximumAttempts = 6)
-    // Separate crop ownership on the same submitter/engine; neither field can starve the other.
-    private val feeOcr = AndroidRelicRoiOcr(submitTextRead, maximumAttempts = 6)
+    private val ocr = AndroidRelicRoiOcr(submitTextRead, maximumAttempts = 6, stopWhen = { read ->
+        read.confirmations >= 2 && LabyrinthShopRefreshDialogText.parse(read.text).kind != LabyrinthShopRefreshDialogKind.UNKNOWN
+    })
+    // Stop each necessary field once verified; a confirmed modal must not queue extra reads.
+    private val feeOcr = AndroidRelicRoiOcr(submitTextRead, maximumAttempts = 6, stopWhen = { read ->
+        LabyrinthShopRefreshDialogText.parseRegions("更新", 2, read.text, read.confirmations).confirmed
+    })
 
     @Synchronized
     fun clear() { ocr.clear(); feeOcr.clear() }
 
     @Synchronized
-    fun resolve(bitmap: Bitmap, result: LabyrinthEntryFrameResult, capturedAtMillis: Long): LabyrinthEntryFrameResult {
+    fun resolve(bitmap: Bitmap, result: LabyrinthEntryFrameResult, capturedAtMillis: Long,
+        requestCurrent: () -> Boolean = { true },
+    ): LabyrinthEntryFrameResult {
+        if (!requestCurrent()) { clear(); return result.copy(shopRefreshDialog = null) }
         // The common modal detector is the structural gate. Do not OCR every shop/map page,
         // and do not depend on SHOP: the legacy classifier sometimes calls this modal EXIT.
         if (result.nodeMoveConfirmation == null) {
@@ -29,8 +36,8 @@ class AndroidLabyrinthShopRefreshResolver(
         ) ?: return result.copy(shopRefreshDialog = LabyrinthShopRefreshDialog())
         val feeRect = ReferenceFitMapper.map(bitmap.width, bitmap.height, STANDARD_REFERENCE, REQUIRED_FEE_ROI)
             ?: return result.copy(shopRefreshDialog = LabyrinthShopRefreshDialog())
-        val read = ocr.read(bitmap, "shop-refresh-dialog", rect, scale = 2, capturedAtMillis = capturedAtMillis)
-        val feeRead = feeOcr.read(bitmap, "shop-refresh-required-fee", feeRect, scale = 2, capturedAtMillis = capturedAtMillis)
+        val read = ocr.read(bitmap, "shop-refresh-dialog", rect, scale = 2, capturedAtMillis = capturedAtMillis, requestCurrent = requestCurrent)
+        val feeRead = feeOcr.read(bitmap, "shop-refresh-required-fee", feeRect, scale = 2, capturedAtMillis = capturedAtMillis, requestCurrent = requestCurrent)
         val dialog = LabyrinthShopRefreshDialogText.parseRegions(
             read?.text, read?.confirmations ?: 0, feeRead?.text, feeRead?.confirmations ?: 0,
         ).copy(

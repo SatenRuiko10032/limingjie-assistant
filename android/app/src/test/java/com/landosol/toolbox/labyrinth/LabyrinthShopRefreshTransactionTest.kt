@@ -120,6 +120,24 @@ class LabyrinthShopRefreshTransactionTest {
         assertTrue(decide(policy, 5, listOf(imprint().copy(choiceRoleImprint = true)), 10_000, 2) is LabyrinthShopDecision.BuyRoleImprint)
     }
 
+    @Test fun `default eight second deadline and exact fees stay unchanged with deferred inventory`() {
+        for (fee in listOf(300, 600)) {
+            val transaction = LabyrinthShopRefreshTransaction()
+            assertTrue(transaction.begin(100L, 10_000, 7L, fee))
+            assertTrue(transaction.confirmed(200L))
+            val goodsOnly = shop(10_000, 8L, trusted = false).copy(layoutReady = false)
+            assertEquals(LabyrinthShopRefreshOutcome.WAIT, transaction.observe(goodsOnly, 8_199L, 8_199L))
+            assertEquals(LabyrinthShopRefreshOutcome.UNRESOLVED, transaction.observe(goodsOnly, 8_200L, 8_200L))
+            assertEquals(fee, transaction.pending?.expectedFee); assertNull(transaction.lastSettled)
+            assertFalse(transaction.begin(8_201L, 10_000, 8L, fee))
+            val paid = shop(10_000 - fee, 8L).copy(layoutReady = false)
+            assertEquals(LabyrinthShopRefreshOutcome.UNRESOLVED, transaction.observe(paid, 8_300L, 8_300L))
+            assertEquals(LabyrinthShopRefreshOutcome.COMMITTED, transaction.observe(paid, 8_400L, 8_400L))
+            assertNull(transaction.pending)
+            assertEquals(LabyrinthShopRefreshOutcome.WAIT, transaction.observe(paid, 8_500L, 8_500L))
+        }
+    }
+
     private fun shop(coins: Int, visual: Long, trusted: Boolean = true) = LabyrinthShopObservation(
         items = emptyList(), dialogState = LabyrinthShopDialogState.NONE,
         coinBalance = coins, coinBalanceConfirmed = trusted, visualFingerprint = visual,

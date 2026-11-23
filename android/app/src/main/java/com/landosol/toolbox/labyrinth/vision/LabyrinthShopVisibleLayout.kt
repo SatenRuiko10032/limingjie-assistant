@@ -162,9 +162,9 @@ internal class LabyrinthShopVisibleLayout(
         // Same original title rectangles as AndroidLabyrinthShopItemResolver's legacy fallback.
         // Kept pure here so Y localization can be tested without loading Android OCR classes.
         val TITLE_RECTS = mapOf(
-            "shop_item_1" to EntryReferenceRect(125, 230, 390, 55),
-            "shop_item_2" to EntryReferenceRect(703, 230, 390, 55),
-            "shop_item_3" to EntryReferenceRect(1278, 230, 390, 55),
+            "shop_item_1" to EntryReferenceRect(125, 240, 390, 55),
+            "shop_item_2" to EntryReferenceRect(703, 240, 390, 55),
+            "shop_item_3" to EntryReferenceRect(1278, 240, 390, 55),
             "shop_item_4" to EntryReferenceRect(125, 513, 390, 55),
             "shop_item_5" to EntryReferenceRect(703, 513, 390, 55),
             "shop_item_6" to EntryReferenceRect(1278, 513, 390, 55),
